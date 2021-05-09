@@ -28,7 +28,7 @@ fn verbatim_inline(src: Input) -> IResult<Input, Box<str>> {
 fn name(src: Input) -> IResult<Input, Box<str>> {
     let (rem, res) = recognize(
         pair(
-          alt((alphanumeric1, tag("_"))),
+          alt((alpha1, tag("_"))),
           many0(alt((alphanumeric1, tag("_"), tag("-"))))
         )
       )(src)?;
@@ -78,10 +78,16 @@ fn attvalue_quoted(src: Input) -> IResult<Input, Box<str>> {
     )(src)
 }
 
+fn attribute_with_value(src: Input) -> IResult<Input, (Box<str>, Box<str>)> {
+    let parse_value = alt((attvalue_quoted, name));
+    let parse_attvalue = separated_pair(name, char('='), parse_value);
+    
+    map(parse_attvalue, |(key, value)| (Box::from(key), Box::from(value)))(src)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     macro_rules! recognises {
         ($name:ident, $parser:ident, $input:literal, $remain:literal, $result:expr) => {
             #[test]
@@ -91,7 +97,6 @@ mod tests {
             }
         }
     }
-
     macro_rules! rejects {
         ($name:ident, $parser:ident, $input:literal) => {
             #[test]
@@ -101,6 +106,12 @@ mod tests {
             }
         }
     }
+
+    recognises!(attr_simplequoted, attribute_with_value, r#"foo="bar"flip"#, "flip", (Box::from("foo"), Box::from("bar")));
+    recognises!(attr_unquoted, attribute_with_value, "foo=bar", "", (Box::from("foo"), Box::from("bar")));
+    rejects!(attr_unfinished, attribute_with_value, "foo=\"bar");
+    rejects!(attr_badescape, attribute_with_value, r#"foo="bar\e'nope""#);
+    rejects!(attr_unfinishedescape, attribute_with_value, r#"foo="\e{1f426""#);
 
     recognises!(verbatim_empty, verbatim_inline, "#{}#", "", Box::from(""));
     recognises!(verbatim_empty_trail, verbatim_inline, "#{}# foo", " foo", Box::from(""));
@@ -112,7 +123,7 @@ mod tests {
     rejects!(verbatim_notatstart, verbatim_inline, "ff#{}#");
 
     recognises!(name_simple, name, "blah_blah-blah foo", " foo", Box::from("blah_blah-blah"));
-    recognises!(name_initialdigit, name, "0day", "", Box::from("0day"));
+    rejects!(name_initialdigit, name, "0day");
     recognises!(name_middigit, name, "not0day", "", Box::from("not0day"));
 
     recognises!(attrq_empty, attvalue_quoted, "\"\"", "", Box::from(""));

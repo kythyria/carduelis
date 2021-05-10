@@ -6,7 +6,9 @@
 //! 
 //! More limitations:
 //! - The only kind of \e escape is bare unicode codepoints.
-//! - You can only use double quote for attributes
+//! - You can only use double quote for quoted attributes
+//! - Unquoted attribute values have to be valid attribute names.
+//! - Attribute names must start with (ascii) alphabetic or underscore, then contain alphanumeric underscore or hyphen.
 
 use nom::IResult;
 use nom::branch::alt;
@@ -85,6 +87,25 @@ fn attribute_with_value(src: Input) -> IResult<Input, (Box<str>, Box<str>)> {
     map(parse_attvalue, |(key, value)| (Box::from(key), Box::from(value)))(src)
 }
 
+fn attribute_list(src: Input) -> IResult<Input, Vec<(Box<str>, Box<str>)>> {
+    let attribute = alt((attribute_with_value, map(name, |i| (i, Box::from("")))));
+    delimited(char('['), many0(delimited(multispace0, attribute, multispace0)), char(']'))(src)
+}
+
+#[derive(Debug, Clone)]
+enum ParsedText {
+    Text(Box<str>),
+    Node(Node),
+}
+
+#[derive(Debug, Clone)]
+struct Node {
+    name: Box<str>,
+    head: Vec<ParsedText>,
+    attributes: Vec<(Box<str>, Box<str>)>,
+    body: Vec<ParsedText>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,6 +127,17 @@ mod tests {
             }
         }
     }
+    macro_rules! recognise_attlist {
+        ($name:ident, $input:literal, $remain:literal, [ $($k:literal=$v:literal),* ]) => {
+            recognises!($name, attribute_list, $input, $remain, vec![ $( (Box::from($k), Box::from($v)) ),* ]);
+        }
+    }
+
+    recognise_attlist!(attlist_simple, r#"[foo="bar"    baz=quux barrow ]"#, "", ["foo"="bar", "baz"="quux", "barrow"=""]);
+    recognise_attlist!(attlist_squarebrackets, r#"[foo="]" bar="[" baz=hah]f"#, "f", ["foo"="]", "bar"="[", "baz"="hah"]);
+    rejects!(attlist_novalue1, attribute_list, "[foo= bar=baz]");
+    rejects!(attlist_novalue2, attribute_list, r#"[bar="what" foo=]"#);
+
 
     recognises!(attr_simplequoted, attribute_with_value, r#"foo="bar"flip"#, "flip", (Box::from("foo"), Box::from("bar")));
     recognises!(attr_unquoted, attribute_with_value, "foo=bar", "", (Box::from("foo"), Box::from("bar")));

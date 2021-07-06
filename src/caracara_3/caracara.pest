@@ -1,0 +1,71 @@
+bs = {"\\"}
+brace_l = {"{"}
+brace_r = {"}"}
+paren_l = {"("}
+paren_r = {")"}
+apos = {"'"}
+quote = {"\""}
+equals = {"="}
+colon = {":"}
+indent = { "\u{FDD0}" }
+outdent = { "\u{FDD1}" }
+newline = { "\n" }
+
+hws = _{ SPACE_SEPARATOR+ }
+
+// names
+entity_name = { (ASCII_ALPHA | "_" ) ~ (ASCII_ALPHA | ASCII_DIGIT | "_" )* }
+attribute_name = { (ASCII_ALPHA | "_" | "-") ~ (ASCII_ALPHA | ASCII_DIGIT | "_" | "-" )* }
+element_name = { (ASCII_ALPHA | "_" | "-") ~ (ASCII_ALPHA | ASCII_DIGIT | "_" | "-" )* }
+
+// escapes
+
+escape = { bs ~ (short_escape | long_escape) }
+short_escape = {
+    bs | brace_l | brace_r | paren_l | paren_r | apos | quote | "[" | "]" |
+    colon
+}
+long_escape = {
+    "e" ~ ((apos ~ entity_name) | ( brace_l ~ entity_name ~ brace_r))
+}
+
+// attributes
+apos_str_inner = { ((!(apos|bs|newline) ~ ANY) | escape)* }
+quote_str_inner = { ((!(quote|bs|newline) ~ ANY) | escape)* }
+quoted_value = { (apos ~ apos_str_inner ~ apos) | (quote ~ quote_str_inner ~ quote) }
+attribute = _{ quoted_attribute | long_attribute | short_attribute }
+quoted_attribute = { attribute_name ~ equals ~ quoted_value }
+long_attribute = { attribute_name ~ equals ~ attribute_name }
+short_attribute = { attribute_name }
+
+attribute_list = { "[" ~ (hws? ~ attribute ~ (hws ~ attribute)*)? ~ hws? ~ "]" }
+
+//elements
+braced_cdata_interior = { 
+    (!(("}" ~ PEEK) | indent | outdent) ~ ANY)+ |
+    (indent ~ braced_cdata_interior* ~ outdent)
+}
+braced_cdata = { PUSH("#"+) ~ "{" ~ braced_cdata_interior* ~ "}" ~ POP }
+
+indented_cdata_interior = {
+    (indent ~ indented_cdata_interior ~ outdent)+ | (!(indent | outdent) ~ ANY)+
+}
+indented_cdata = {"#:\n" ~ indent ~ indented_cdata_interior* ~ outdent}
+
+head_text = { (!(indent | outdent | "(" | ")" | "\"") ~ ANY)+ }
+head_inner = _{ escape | element | head | head_text }
+head = { "(" ~ ((indent ~ head_inner* ~ outdent) | head_inner* )  ~ ")"}
+
+body_text = { (!(indent | outdent | "{" | "}" | "\"") ~ ANY)+ }
+braced_body_inner = { escape | element | braced_body | body_text }
+braced_body = { "{" ~ ( (indent ~ braced_body_inner* ~ outdent) | braced_body_inner*) ~ "}"}
+
+indented_body_text = { (!(indent | outdent | "\\") ~ ANY)+ }
+indented_body_inner = _{ escape | element | (indent ~ indented_body_inner* ~ outdent) | indented_body_text }
+indented_body = { ":\n" ~ indent ~ indented_body_inner* ~ outdent }
+
+body = { indented_body | indented_cdata | braced_body | braced_cdata }
+
+element = { bs ~ element_name ~ ( (head ~ attribute_list?) | (attribute_list ~ head?) )? ~ body? }
+
+document = _{ SOI ~ (indented_body_inner)* ~ EOI}

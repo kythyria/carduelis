@@ -1,0 +1,25 @@
+Backslash followed by {}()"'\ always mean themselves.
+
+Whitespace rules
+
+Need to support all of these:
+\section:
+    \code#:
+        foo
+            bar
+          baz
+    Hmm
+    \code#:
+        foo
+      bar
+        baz
+            bap
+       barrow
+      qux
+     quz
+
+
+Which probably requires that so long as it's kept above the indent level of the \code by INDENT or MISDENT, the
+parser considers it to be part of the block.
+
+VASTLY easier is to require some suitable character, pipe looks good, between the whitespace used for indentation and that which is in a literal block and must be taken literally.

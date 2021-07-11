@@ -4,7 +4,7 @@
 //!
 //! To simplify implementation, this is immutable outside of builders: No DOM editing, just rewrites of subtrees.
 
-use std::{collections::HashMap, num::NonZeroUsize};
+use std::{collections::HashMap, marker::PhantomData, num::NonZeroUsize};
 
 use super::spanned_string::SpannedString;
 
@@ -34,16 +34,16 @@ pub struct Node<'doc> {
 pub struct Attributes<'doc>(Node<'doc>);
 
 /// Iterator over successive parents
-pub struct Ancestors<'doc>;
+pub struct Ancestors<'doc>(Node<'doc>);
 
 /// Iterator over next siblings
-pub struct NextSiblings<'doc>;
+pub struct NextSiblings<'doc>(Node<'doc>);
 
 /// Iterator over previous siblings
-pub struct PrevSiblings<'doc>;
+pub struct PrevSiblings<'doc>(Node<'doc>);
 
 /// Iterator over descendants, descending via body
-pub struct BodyDescendants<'doc>;
+pub struct BodyDescendants<'doc>(PhantomData<&'doc ()>);
 
 struct InternalNode {
     parent: ParentId,

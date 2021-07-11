@@ -36,7 +36,7 @@ lazy_static! {
     static ref LINE_RE: Regex = Regex::new(r"(?P<indent>[\p{White_Space}&&[^\r\n\u{000C}\u{000B}\u{2028}\u{2029}\u{0085}]]*)(?P<data>.*?)(?P<eol>\r\n|[\r\n\u{000C}\u{000B}\u{2028}\u{2029}\u{0085}]|$)").unwrap();
 }
 
-pub fn scan_string(input: &str, max_indents: usize) -> Result<Scanned, ParseError> {
+pub fn scan_string(input: &str, limits: Limits) -> Result<Scanned, ParseError> {
     if input.len() >= u32::MAX as usize { return Err(ParseError::InputTooLong) }
 
     let mut delimited_text = String::with_capacity(input.len());
@@ -80,7 +80,7 @@ pub fn scan_string(input: &str, max_indents: usize) -> Result<Scanned, ParseErro
                         indent_start = (new_remain.as_ptr() as usize) - (input.as_ptr() as usize);
                         delimited_text.push(INDENT);
 
-                        if indents.len() > max_indents {
+                        if indents.len() > limits.max_indents {
                             return Err(ParseError::TooManyIndents(curr_line))
                         }
                         break;

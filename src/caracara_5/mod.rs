@@ -1,3 +1,5 @@
+mod rowan_utils;
+
 use lazy_static::lazy_static;
 use logos::{Lexer, Logos};
 use regex::Regex;
@@ -49,45 +51,44 @@ impl From<SyntaxKind> for rowan::SyntaxKind {
     }
 }
 
-macro_rules! build {
-    ($builder:expr, $sk:ident {$($csk:tt $cval:tt),*}) => {
-        build!($builder, (SyntaxKind::$sk) {$($csk $cval),*})
-    };
-    ($builder:expr, $sk:ident $val:expr) => {
-        build!($builder, (SyntaxKind::$sk) ($val))
-    };
-    ($builder:expr, ($sk:expr) ($val:expr)) => {
-        $builder.token($sk.into(), $val)
-    };
-    ($builder:expr, ($sk:expr) {$($csk:tt $cval:tt),*} ) => {
-        {
-            $builder.start_node($sk.into());
-            $({
-                build!($builder, $csk $cval);
-            })*
-            $builder.finish_node();
-        }
-    };
-}
-
 trait GreenBuildExt {
     fn interior<R>(&mut self, kind: SyntaxKind, body: impl FnOnce(&mut Self) -> R) -> R;
     fn leaf(&mut self, kind: SyntaxKind, val: &str);
+    fn kw(&mut self, kind: SyntaxKind);
 }
 impl<'cache> GreenBuildExt for GreenNodeBuilder<'cache>
 {
     fn interior<R>(&mut self, kind: SyntaxKind, body: impl FnOnce(&mut Self) -> R) -> R {
         self.start_node(kind.into());
-        eprintln!("builder.interior({:?}, |builder|{{", kind);
         let res = body(self);
-        eprintln!("}};");
         self.finish_node();
         res
     }
 
     fn leaf(&mut self, kind: SyntaxKind, val: &str) {
         self.token(kind.into(), val);
-        eprintln!("builder.leaf({:?}, {:?});", kind, val);
+    }
+
+    fn kw(&mut self, kind: SyntaxKind) {
+        use SyntaxKind::*;
+        self.leaf(kind, match kind {
+            LeftBrace            => "{",
+            RightBrace           => "}",
+            LeftParen            => "(",
+            RightParen           => ")",
+            LeftBracket          => "[",
+            RightBracket         => "]",
+            Pipe                 => "|",
+            Equals               => "=",
+            SingleQuote          => "\'",
+            DoubleQuote          => "\"",
+            Backslash            => "\\",
+            Colon                => ":",
+            Hash                 => "#",
+            ImpliedClose         => "",
+            StartEntityReference => "\\e",
+            _ => panic!("Not a keyword-like: {:?}", kind)
+        })
     }
 }
 
@@ -142,30 +143,26 @@ fn quoted_string<'s>(builder: &mut GreenNodeBuilder, input: &'s str) -> bool {
         while let Some(token) = lexer.next() {
             match token {
                 Token::EscapedChar => {
-                    build!(builder, Escape {
-                        Backslash "\\",
-                        EscapedChar (&lexer.slice()[1..2])
-                    });
                     builder.interior(SyntaxKind::Escape, |b|{
-                        b.leaf(SyntaxKind::Backslash, "\\");
+                        b.kw(SyntaxKind::Backslash);
                         b.leaf(SyntaxKind::EscapedChar, &lexer.slice()[1..2]);
                     })
                 },
                 Token::EntityReference => {
                     let slice = lexer.slice();
-                    let (start_sk, start_val, end_sk, end_val) = match slice.chars().nth(2).unwrap() {
-                        '{'  => (SyntaxKind::LeftBrace,   "{", SyntaxKind::RightBrace,  "}"),
-                        '('  => (SyntaxKind::LeftParen,   "(", SyntaxKind::RightParen,  ")"),
-                        '\'' => (SyntaxKind::SingleQuote, "'", SyntaxKind::ImpliedClose, ""),
+                    let (start_sk, end_sk, end_val) = match slice.chars().nth(2).unwrap() {
+                        '{'  => (SyntaxKind::LeftBrace,   SyntaxKind::RightBrace,  "}"),
+                        '('  => (SyntaxKind::LeftParen,   SyntaxKind::RightParen,  ")"),
+                        '\'' => (SyntaxKind::SingleQuote, SyntaxKind::ImpliedClose, ""),
                         _ => panic!()
                     };
                     lexer.bump(end_val.len());
                     builder.interior(SyntaxKind::EntityReference, |builder|{
                         builder.leaf(SyntaxKind::StartEntityReference, slice);
-                        builder.leaf(start_sk, start_val);
+                        builder.kw(start_sk);
                         builder.leaf(SyntaxKind::Name, &slice[3..(slice.len() - end_val.len())]);
                         if lexer.slice().ends_with(end_val) {
-                            builder.leaf(end_sk, end_val);
+                            builder.kw(end_sk);
                         }
                         else {
                             builder.leaf(SyntaxKind::Error, "");
@@ -285,6 +282,7 @@ fn attribute_list<'s>(builder: &mut GreenNodeBuilder, input: &'s str) -> Option<
 
 mod tests {
     use rowan::{GreenNode, GreenNodeBuilder};
+    use super::{quoted_string, attribute_list, SyntaxKind, SyntaxKind::*, GreenBuildExt};
 
     trait ConcreteParser<'s> {
         fn parse(&mut self, input: &'s str) -> Option<(GreenNode, &'s str)>;
@@ -328,141 +326,275 @@ mod tests {
         }
     }
 
-    macro_rules! recognise_cst {
-        ($testname:ident, $parser:expr, $input:literal, Fail) => {
-            #[test]
-            fn $testname() {
-                assert_eq!($parser.parse($input), None);
-            }
-        };
-
-        ($testname:ident, $parser:expr, ($input:literal), $result_tok:ident $result_body:tt) => {
-            recognise_cst!($testname, $parser, ($input, ""), $result_tok $result_body);
-        };
-        ($testname:ident, $parser:expr, ($input:literal, $remainder:literal), $result_tok:ident $result_body:tt) => {
-            #[test]
-            fn $testname() {
-                use super::SyntaxKind;
-                let mut builder = GreenNodeBuilder::new();
-                build!(builder, $result_tok $result_body);
-                let expected = builder.finish();
-                let expected_str = format!("{}", expected);
-                let result = $parser.parse($input);
-                let result_str = result.as_ref().map(|i| format!("{}", i.0));
-                assert_eq!(result, Some((expected, $remainder)), "    result: {:?}\nexpected: {:?}", result_str, expected_str);
-            }
-        };
+    trait RecogniseCstSrc {
+        fn to_cst_src(self) -> (&'static str, &'static str);
+    }
+    impl RecogniseCstSrc for &'static str {
+        fn to_cst_src(self) -> (&'static str, &'static str) {
+            (self, "")
+        }
+    }
+    impl RecogniseCstSrc for (&'static str, &'static str) {
+        fn to_cst_src(self) -> (&'static str, &'static str) {
+            self
+        }
+    }
+    struct RecogniseCst<F: ConcreteParser<'static>, S: RecogniseCstSrc> {
+        src: S,
+        func: F,
+        result: rowan::GreenNode,
+        //_pd: std::marker::PhantomData<&'a str>
+    }
+    impl<F: ConcreteParser<'static>, S: RecogniseCstSrc> RecogniseCst<F, S>{
+        fn test(mut self) {
+            let src = self.src.to_cst_src();
+            let expected = Some((self.result, src.1));
+            let obtained = self.func.parse(src.0);
+            assert_eq!(obtained, expected);
+        }
     }
 
-    recognise_cst!(attlist_simple, super::attribute_list, (r#"[foo="bar"    baz=quux barrow ]"#),
-        AttributeList {
-            LeftBracket "[",
-            Attribute {
-                Name "foo",
-                Equals "=",
-                QuotedString {
-                    DoubleQuote "\"",
-                    Text "bar",
-                    DoubleQuote "\""
-                }
-            },
-            Whitespace "    ",
-            Attribute {
-                Name "baz",
-                Equals "=",
-                Name "quux"
-            },
-            Whitespace " ",
-            Attribute {
-                Name "barrow",
-                Whitespace " "
-            },
-            RightBracket "]"
+    fn cst<'a>(kind: SyntaxKind, body: impl FnOnce(&mut rowan::GreenNodeBuilder<'a>)) -> rowan::GreenNode {
+        let mut b = GreenNodeBuilder::new();
+        b.start_node(kind.into());
+        body(&mut b);
+        b.finish_node();
+        b.finish()
+    }
+    
+    macro_rules! testgroup {
+        ($m:ident $($n:ident: $v:expr)*) => {
+            #[allow(unused)]
+            mod $m {
+                use super::*;
+                $(
+                    #[test] fn $n() { $v.test() }
+                )*
+            }
+        }
+    }
+
+    testgroup!(attlist 
+        simple: RecogniseCst {
+            func: attribute_list, 
+            src: r#"[foo="bar"    baz=quux barrow ]"#,
+            result: cst(AttributeList, |b| {
+                b.kw(LeftBracket);
+                b.interior(Attribute, |b|{
+                    b.leaf(Name, "foo");
+                    b.kw(Equals);
+                    b.interior(QuotedString, |b|{
+                        b.kw(DoubleQuote);
+                        b.leaf(Text, "bar");
+                        b.kw(DoubleQuote);
+                    });
+                });
+                b.leaf(Whitespace, "    ");
+                b.interior(Attribute, |b|{
+                    b.leaf(Name, "baz");
+                    b.kw(Equals);
+                    b.leaf(Name, "quux");
+                });
+                b.leaf(Whitespace, " ");
+                b.interior(Attribute, |b|{
+                    b.leaf(Name, "barrow");
+                    b.leaf(Whitespace, " ");
+                });
+                b.kw(RightBracket);
+            })
+        }
+        
+        squarebrackets: RecogniseCst {
+            func: attribute_list,
+            src: (r#"[foo="]" bar="[" baz=hah]f"#, "f"),
+            result: cst(AttributeList, |b| {
+                b.kw(LeftBracket);
+                b.interior(Attribute, |b| {
+                    b.leaf(Name, "foo");
+                    b.kw(Equals);
+                    b.interior(QuotedString, |b| {
+                        b.kw(DoubleQuote);
+                        b.leaf(Text, "]");
+                        b.kw(DoubleQuote);
+                    });
+                });
+                b.leaf(Whitespace, " ");
+                b.interior(Attribute, |b| {
+                    b.leaf(Name, "bar");
+                    b.kw(Equals);
+                    b.interior(QuotedString, |b| {
+                        b.kw(DoubleQuote);
+                        b.leaf(Text, "[");
+                        b.kw(DoubleQuote);
+                    });
+                });
+                b.leaf(Whitespace, " ");
+                b.interior(Attribute, |b| {
+                    b.leaf(Name, "baz");
+                    b.kw(Equals);
+                    b.leaf(Name, "hah");
+                });
+                b.kw(RightBracket);
+            })
+        }
+        
+        novalue1: RecogniseCst {
+            func: attribute_list,
+            src: "[foo= bar=baz]", 
+            result: cst(AttributeList, |b| {
+                b.kw(LeftBracket);
+                b.interior(Attribute, |b| {
+                    b.leaf(Name, "foo");
+                    b.kw(Equals);
+                    b.leaf(Whitespace, " ");
+                    b.leaf(Name, "bar");
+                });
+                b.kw(Equals);
+                b.interior(Attribute, |b| {
+                    b.leaf(Name, "baz");
+                });
+                b.kw(RightBracket);
+            })
+        }
+        
+        novalue2: RecogniseCst {
+            func: attribute_list,
+            src: r#"[bar="what" foo=]"#,
+            result: cst(AttributeList, |b| {
+                b.kw(LeftBracket);
+                b.interior(Attribute, |b| {
+                    b.leaf(Name, "bar");
+                    b.kw(Equals);
+                    b.interior(QuotedString, |b| {
+                        b.kw(DoubleQuote);
+                        b.leaf(Text, "what");
+                        b.kw(DoubleQuote);
+                    });
+                });
+                b.leaf(Whitespace, " ");
+                b.interior(Attribute, |b| {
+                    b.leaf(Name, "foo");
+                    b.kw(Equals);
+                });
+                b.kw(RightBracket);
+            })
+        }
+        
+        nospaces: RecogniseCst {
+            func: attribute_list,
+            src: "[foo=\"bar\"flip]",
+            result: cst(AttributeList, |b| {
+                b.kw(LeftBracket);
+                b.interior(Attribute, |b| {
+                    b.leaf(Name, "foo");
+                    b.kw(Equals);
+                    b.interior(QuotedString, |b| {
+                        b.kw(DoubleQuote);
+                        b.leaf(Text, "bar");
+                        b.kw(DoubleQuote);
+                    });
+                });
+                b.interior(Attribute, |b| {
+                    b.leaf(Name, "flip");
+                });
+                b.kw(RightBracket);
+            })
         }
     );
 
-    recognise_cst!(attlist_squarebrackets, super::attribute_list, (r#"[foo="]" bar="[" baz=hah]f"#, "f"),
-        AttributeList {
-            LeftBracket "[",
-            Attribute {
-                Name "foo",
-                Equals "=",
-                QuotedString {
-                    DoubleQuote "\"",
-                    Text "]",
-                    DoubleQuote "\""
-                }
-            },
-            Whitespace " ",
-            Attribute {
-                Name "bar",
-                Equals "=",
-                QuotedString {
-                    DoubleQuote "\"",
-                    Text "[",
-                    DoubleQuote "\""
-                }
-            },
-            Whitespace " ",
-            Attribute {
-                Name "baz",
-                Equals "=",
-                Name "hah"
-            },
-            RightBracket "]"
+    testgroup!(attrq
+        empty: RecogniseCst {
+            src: "\"\"",
+            func: quoted_string,
+            result: cst(QuotedString, |b|{
+                b.kw(DoubleQuote);
+                b.kw(DoubleQuote);
+            })
+        }
+
+        simple: RecogniseCst {
+            src: "\"foo\"",
+            func: quoted_string,
+            result: cst(QuotedString, |b| {
+                b.kw(DoubleQuote);
+                b.leaf(Text, "foo");
+                b.kw(DoubleQuote);
+            })
+        }
+
+        escapes: RecogniseCst {
+            src: r#""foo\"bar\\baz""#,
+            func: quoted_string,
+            result: cst(QuotedString, |b|{
+                b.kw(DoubleQuote);
+                b.leaf(Text, "foo");
+                b.interior(Escape, |b|{
+                    b.kw(Backslash);
+                    b.leaf(EscapedChar, "\"");
+                });
+                b.leaf(Text, "bar");
+                b.interior(Escape, |b|{
+                    b.kw(Backslash);
+                    b.leaf(EscapedChar, "\\");
+                });
+                b.leaf(Text, "baz");
+                b.kw(DoubleQuote);
+            })
+        }
+
+        shortentity: RecogniseCst {
+            src: r#""i\e'20qux""#,
+            func: quoted_string,
+            result: cst(QuotedString, |b| {
+                b.kw(DoubleQuote);
+                b.leaf(Text, "i");
+                b.interior(EntityReference, |b|{
+                    b.kw(StartEntityReference);
+                    b.kw(SingleQuote);
+                    b.leaf(Name, "20");
+                    b.kw(ImpliedClose);
+                });
+                b.leaf(Text, "qux");
+                b.kw(DoubleQuote);
+            })
         }
     );
 
-    recognise_cst!(attlist_novalue1, super::attribute_list, ("[foo= bar=baz]"), AttributeList {
-        LeftBracket "[",
-        Attribute {
-            Name "foo",
-            Equals "=",
-            Whitespace " ",
-            Name "bar"
-        },
-        Equals "=",
-        Attribute {
-            Name "baz"
-        },
-        RightBracket "]"
-    });
+    mod attrq_2 {
+        use super::*;
 
-    recognise_cst!(attlist_novalue2, super::attribute_list, (r#"[bar="what" foo=]"#), AttributeList {
-        LeftBracket "[",
-        Attribute {
-            Name "bar",
-            Equals "=",
-            QuotedString {
-                DoubleQuote "\"",
-                Text "what",
-                DoubleQuote "\""
-            }
-        },
-        Whitespace " ",
-        Attribute {
-            Name "foo",
-            Equals "="
-        },
-        RightBracket "]"
-    });
+        #[test] fn brace_entity() { RecogniseCst {
+            func: quoted_string,
+            src: r#""i\e{foo}qux""#,
+            result: cst(QuotedString, |b| {
+                b.kw(DoubleQuote);
+                b.leaf(Text, "i");
+                b.interior(EntityReference, |b|{
+                    b.kw(StartEntityReference);
+                    b.kw(LeftBrace);
+                    b.leaf(Name, "foo");
+                    b.kw(RightBrace);
+                });
+                b.leaf(Text, "qux");
+                b.kw(DoubleQuote);
+            })
+        }.test()}
 
-    recognise_cst!(attlist_nospaces, super::attribute_list, ("[foo=\"bar\"flip]"), AttributeList{
-        LeftBracket "[",
-        Attribute {
-            Name "foo",
-            Equals "=",
-            QuotedString {
-                DoubleQuote "\"",
-                Text "bar",
-                DoubleQuote "\""
-            }
-        },
-        Attribute {
-            Name "flip"
-        },
-        RightBracket "]"
-    });
-
-    //recognise_cst!(attrq_empty, super::quoted_string)
+        #[test] fn paren_entity() { RecogniseCst {
+            func: quoted_string,
+            src: r#""i\e(foo)qux""#,
+            result: cst(QuotedString, |b| {
+                b.kw(DoubleQuote);
+                b.leaf(Text, "i");
+                b.interior(EntityReference, |b|{
+                    b.kw(StartEntityReference);
+                    b.kw(LeftParen);
+                    b.leaf(Name, "foo");
+                    b.kw(RightParen);
+                });
+                b.leaf(Text, "qux");
+                b.kw(DoubleQuote);
+            })
+        }.test()}
+    }
 }

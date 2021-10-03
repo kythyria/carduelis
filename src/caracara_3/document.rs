@@ -1,6 +1,5 @@
 //! Abstract trees for Caracara documents
 
-use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::collections::BTreeMap;
 

@@ -2,10 +2,14 @@ mod rowan_utils;
 
 use lazy_static::lazy_static;
 use logos::{Lexer, Logos};
+use num_enum::TryFromPrimitive;
 use regex::Regex;
 use rowan::GreenNodeBuilder;
 
-#[derive(Copy, Clone, Debug)]
+use rowan_utils::*;
+
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, TryFromPrimitive)]
+#[repr(u16)]
 enum SyntaxKind {
     //- Individual special characters -
     LeftBrace = 0,
@@ -50,45 +54,40 @@ impl From<SyntaxKind> for rowan::SyntaxKind {
         Self(kind as u16)
     }
 }
-
-trait GreenBuildExt {
-    fn interior<R>(&mut self, kind: SyntaxKind, body: impl FnOnce(&mut Self) -> R) -> R;
-    fn leaf(&mut self, kind: SyntaxKind, val: &str);
-    fn kw(&mut self, kind: SyntaxKind);
-}
-impl<'cache> GreenBuildExt for GreenNodeBuilder<'cache>
-{
-    fn interior<R>(&mut self, kind: SyntaxKind, body: impl FnOnce(&mut Self) -> R) -> R {
-        self.start_node(kind.into());
-        let res = body(self);
-        self.finish_node();
-        res
-    }
-
-    fn leaf(&mut self, kind: SyntaxKind, val: &str) {
-        self.token(kind.into(), val);
-    }
-
-    fn kw(&mut self, kind: SyntaxKind) {
+impl rowan_utils::FixedValues for SyntaxKind {
+    fn try_fixed_value(&self) -> Option<&'static str> {
         use SyntaxKind::*;
-        self.leaf(kind, match kind {
-            LeftBrace            => "{",
-            RightBrace           => "}",
-            LeftParen            => "(",
-            RightParen           => ")",
-            LeftBracket          => "[",
-            RightBracket         => "]",
-            Pipe                 => "|",
-            Equals               => "=",
-            SingleQuote          => "\'",
-            DoubleQuote          => "\"",
-            Backslash            => "\\",
-            Colon                => ":",
-            Hash                 => "#",
-            ImpliedClose         => "",
-            StartEntityReference => "\\e",
-            _ => panic!("Not a keyword-like: {:?}", kind)
-        })
+        match self {
+            LeftBrace            => Some("{"),
+            RightBrace           => Some("}"),
+            LeftParen            => Some("("),
+            RightParen           => Some(")"),
+            LeftBracket          => Some("["),
+            RightBracket         => Some("]"),
+            Pipe                 => Some("|"),
+            Equals               => Some("="),
+            SingleQuote          => Some("\'"),
+            DoubleQuote          => Some("\""),
+            Backslash            => Some("\\"),
+            Colon                => Some(":"),
+            Hash                 => Some("#"),
+            ImpliedClose         => Some(""),
+            StartEntityReference => Some("\\e"),
+            _ => None
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct Lang;
+impl rowan::Language for Lang {
+    type Kind = SyntaxKind;
+
+    fn kind_from_raw(raw: rowan::SyntaxKind) -> Self::Kind {
+        SyntaxKind::try_from_primitive(raw.0).unwrap()
+    }
+
+    fn kind_to_raw(kind: Self::Kind) -> rowan::SyntaxKind {
+        kind.into()
     }
 }
 
@@ -119,25 +118,22 @@ collectors! {
 fn quoted_string<'s>(builder: &mut GreenNodeBuilder, input: &'s str) -> bool {
     #[derive(Logos, PartialEq, Debug)]
     enum Token {
-        #[regex(r#"\\[\\'"]"#)]   EscapedChar,
+        #[regex(r#"\\[^e]"#)]
+        EscapedChar,
 
-        #[regex(r"\\e[\{\('][A-Za-z][-_A-Za-z0-9]*")]
+        #[regex(r"\\e['\{\(][A-Za-z][-_A-Za-z0-9]*", priority=2)]
         EntityReference,
 
-        #[regex(r"[^\r\n\u{000C}\u{000B}\u{2028}\u{2029}\u{0085}]+")]
+        #[regex(r"[^\\\r\n\u{000C}\u{000B}\u{2028}\u{2029}\u{0085}]+", priority=1)]
         Text,
 
         #[error] Error
     }
     
-    let (delim_sk, delim_val) = match &input[0..1] {
-        "\'" => (SyntaxKind::SingleQuote, "\'"),
-        "\"" => (SyntaxKind::DoubleQuote, "\""),
-        _ => return false
-    };
+    if &input[0..1] != "\"" { return false }
 
     builder.interior(SyntaxKind::QuotedString, |builder|{
-        builder.leaf(delim_sk, delim_val);
+        builder.kw(SyntaxKind::DoubleQuote);
 
         let mut lexer = logos::Lexer::<Token>::new(&input[1..(input.len()-1)]);
         while let Some(token) = lexer.next() {
@@ -157,8 +153,9 @@ fn quoted_string<'s>(builder: &mut GreenNodeBuilder, input: &'s str) -> bool {
                         _ => panic!()
                     };
                     lexer.bump(end_val.len());
+                    let slice = lexer.slice();
                     builder.interior(SyntaxKind::EntityReference, |builder|{
-                        builder.leaf(SyntaxKind::StartEntityReference, slice);
+                        builder.kw(SyntaxKind::StartEntityReference);
                         builder.kw(start_sk);
                         builder.leaf(SyntaxKind::Name, &slice[3..(slice.len() - end_val.len())]);
                         if lexer.slice().ends_with(end_val) {
@@ -174,7 +171,7 @@ fn quoted_string<'s>(builder: &mut GreenNodeBuilder, input: &'s str) -> bool {
             }
         }
         
-        builder.leaf(delim_sk, delim_val);
+        builder.kw(SyntaxKind::DoubleQuote);
         return true
     })
 }
@@ -185,7 +182,7 @@ fn attribute_list<'s>(builder: &mut GreenNodeBuilder, input: &'s str) -> Option<
         #[token("]")] RightBracket,
         #[token("=")] Equals,
         #[regex(r"[-_A-Za-z0-9]*")] BareString,
-        #[regex(r#"'(\\.|[^'\\])*'|"(\\.|[^"\\])*""#)] QuotedString,
+        #[regex(r#""(\\.|[^"\\])*""#)] QuotedString,
         #[regex(r"[\p{White_Space}]+")] Whitespace,
 
         #[error] Error
@@ -280,9 +277,11 @@ fn attribute_list<'s>(builder: &mut GreenNodeBuilder, input: &'s str) -> Option<
     Some(lexer.remainder())
 }
 
+#[cfg(test)]
 mod tests {
     use rowan::{GreenNode, GreenNodeBuilder};
-    use super::{quoted_string, attribute_list, SyntaxKind, SyntaxKind::*, GreenBuildExt};
+    use super::{quoted_string, attribute_list, SyntaxKind::*, GreenBuildExt};
+    use super::rowan_utils::{cst, format_cst};
 
     trait ConcreteParser<'s> {
         fn parse(&mut self, input: &'s str) -> Option<(GreenNode, &'s str)>;
@@ -343,23 +342,19 @@ mod tests {
         src: S,
         func: F,
         result: rowan::GreenNode,
-        //_pd: std::marker::PhantomData<&'a str>
     }
     impl<F: ConcreteParser<'static>, S: RecogniseCstSrc> RecogniseCst<F, S>{
         fn test(mut self) {
             let src = self.src.to_cst_src();
             let expected = Some((self.result, src.1));
             let obtained = self.func.parse(src.0);
-            assert_eq!(obtained, expected);
-        }
-    }
 
-    fn cst<'a>(kind: SyntaxKind, body: impl FnOnce(&mut rowan::GreenNodeBuilder<'a>)) -> rowan::GreenNode {
-        let mut b = GreenNodeBuilder::new();
-        b.start_node(kind.into());
-        body(&mut b);
-        b.finish_node();
-        b.finish()
+            let obtained_str = obtained.as_ref()
+                .map(|i| format!("{}", format_cst::<super::Lang>(&i.0)) )
+                .unwrap_or("None".into());
+
+            assert_eq!(obtained.clone(), expected, "Got:\n{}", obtained_str);
+        }
     }
     
     macro_rules! testgroup {
@@ -502,17 +497,19 @@ mod tests {
         }
     );
 
-    testgroup!(attrq
-        empty: RecogniseCst {
+    mod attrq {
+        use super::*;
+        
+        #[test] fn empty() { RecogniseCst {
             src: "\"\"",
             func: quoted_string,
             result: cst(QuotedString, |b|{
                 b.kw(DoubleQuote);
                 b.kw(DoubleQuote);
             })
-        }
+        }.test()}
 
-        simple: RecogniseCst {
+        #[test] fn simple() { RecogniseCst {
             src: "\"foo\"",
             func: quoted_string,
             result: cst(QuotedString, |b| {
@@ -520,9 +517,9 @@ mod tests {
                 b.leaf(Text, "foo");
                 b.kw(DoubleQuote);
             })
-        }
+        }.test()}
 
-        escapes: RecogniseCst {
+        #[test] fn escapes() { RecogniseCst {
             src: r#""foo\"bar\\baz""#,
             func: quoted_string,
             result: cst(QuotedString, |b|{
@@ -540,10 +537,10 @@ mod tests {
                 b.leaf(Text, "baz");
                 b.kw(DoubleQuote);
             })
-        }
-
-        shortentity: RecogniseCst {
-            src: r#""i\e'20qux""#,
+        }.test()}
+    
+        #[test] fn shortentity() { RecogniseCst {
+            src: r#""i\e'u20 qux""#,
             func: quoted_string,
             result: cst(QuotedString, |b| {
                 b.kw(DoubleQuote);
@@ -551,17 +548,13 @@ mod tests {
                 b.interior(EntityReference, |b|{
                     b.kw(StartEntityReference);
                     b.kw(SingleQuote);
-                    b.leaf(Name, "20");
+                    b.leaf(Name, "u20");
                     b.kw(ImpliedClose);
                 });
-                b.leaf(Text, "qux");
+                b.leaf(Text, " qux");
                 b.kw(DoubleQuote);
             })
-        }
-    );
-
-    mod attrq_2 {
-        use super::*;
+        }.test()}
 
         #[test] fn brace_entity() { RecogniseCst {
             func: quoted_string,

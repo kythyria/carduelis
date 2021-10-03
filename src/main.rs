@@ -23,8 +23,8 @@ fn main() {
     let evil_result= caracara_3::parser::get_parse(&evil);
     println!("parsed!");
     match evil_result {
-        Ok(p) => {
-            let mut evil_tree = Vec::<u8>::new();
+        Ok(_p) => {
+            let mut _evil_tree = Vec::<u8>::new();
             //let r = pest_visualiser::draw(&mut evil_tree, p);
             //r.unwrap();
         },
@@ -34,15 +34,16 @@ fn main() {
     }
     
 
-    return;
-    let pr = caracara_3::parser::get_parse(
-        //r#"\z[foo bar=baz   qux="f\e{bird}g" r="why"]"#
-        r#"foo\z[v=z foo="bar" flip] bar baz"#
-    );
-    match pr {
-        Ok(p) => {
-            pest_visualiser::draw(&mut std::io::stdout(), p).unwrap();
-        },
-        Err(e) => println!("{}", e)
+    if false {
+        let pr = caracara_3::parser::get_parse(
+            //r#"\z[foo bar=baz   qux="f\e{bird}g" r="why"]"#
+            r#"foo\z[v=z foo="bar" flip] bar baz"#
+        );
+        match pr {
+            Ok(p) => {
+                pest_visualiser::draw(&mut std::io::stdout(), p).unwrap();
+            },
+            Err(e) => println!("{}", e)
+        }
     }
 }

@@ -23,3 +23,10 @@ Which probably requires that so long as it's kept above the indent level of the 
 parser considers it to be part of the block.
 
 VASTLY easier is to require some suitable character, pipe looks good, between the whitespace used for indentation and that which is in a literal block and must be taken literally.
+
+Hmm, how to lex/classify? Take cue from TeX?
+  Escape        "\\"
+  Name start    /[A-Za-z]/        (borrow the XML def for i18n?)
+  Name          /[-_:A-Za-z0-9]/  (should : be legal here? It'll make ' bodies less useful)
+  
+  

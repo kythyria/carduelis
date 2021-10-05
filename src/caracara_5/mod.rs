@@ -1,9 +1,7 @@
 mod rowan_utils;
 
-use lazy_static::lazy_static;
 use logos::{Lexer, Logos};
 use num_enum::TryFromPrimitive;
-use regex::Regex;
 use rowan::GreenNodeBuilder;
 
 use rowan_utils::*;
@@ -89,30 +87,6 @@ impl rowan::Language for Lang {
     fn kind_to_raw(kind: Self::Kind) -> rowan::SyntaxKind {
         kind.into()
     }
-}
-
-macro_rules! collectors {
-    ($($re_name:ident, $func:ident: $re:literal;)*) => { 
-        lazy_static! {
-            $(
-                static ref $re_name: Regex = Regex::new($re).unwrap();
-            )*
-        }
-        $(
-            fn $func<'s>(input: &'s str) -> Option<(&'s str, &'s str)> {
-                let m = $re_name.find(input)?;
-                Some((m.as_str(), &input[m.end()..]))
-            }
-        )*
-    }
-}
-
-collectors! {
-    WS, c_whitespace: r"^[\p{White_Space}&&[^\r\n\u{000C}\u{000B}\u{2028}\u{2029}\u{0085}]]*";
-    NAME, c_name: r"^[A-Za-z][-_A-Za-z0-9]";
-    ENTREF_BRACE, c_entref_brace: r"^\{[A-Za-z][-_A-Za-z0-9]*\}";
-    ENTREF_PAREN, c_entref_paren: r"^\([A-Za-z][-_A-Za-z0-9]*\)";
-    ENTREF_APOS,  c_entref_apos:  r"^'[A-Za-z][-_A-Za-z0-9]*";
 }
 
 fn quoted_string<'s>(builder: &mut GreenNodeBuilder, input: &'s str) -> bool {
@@ -356,21 +330,11 @@ mod tests {
             assert_eq!(obtained.clone(), expected, "Got:\n{}", obtained_str);
         }
     }
-    
-    macro_rules! testgroup {
-        ($m:ident $($n:ident: $v:expr)*) => {
-            #[allow(unused)]
-            mod $m {
-                use super::*;
-                $(
-                    #[test] fn $n() { $v.test() }
-                )*
-            }
-        }
-    }
 
-    testgroup!(attlist 
-        simple: RecogniseCst {
+    mod attlist {
+        use super::*;
+
+        #[test] fn simple() { RecogniseCst {
             func: attribute_list, 
             src: r#"[foo="bar"    baz=quux barrow ]"#,
             result: cst(AttributeList, |b| {
@@ -397,9 +361,9 @@ mod tests {
                 });
                 b.kw(RightBracket);
             })
-        }
+        }.test()}
         
-        squarebrackets: RecogniseCst {
+        #[test] fn squarebrackets() { RecogniseCst {
             func: attribute_list,
             src: (r#"[foo="]" bar="[" baz=hah]f"#, "f"),
             result: cst(AttributeList, |b| {
@@ -431,9 +395,9 @@ mod tests {
                 });
                 b.kw(RightBracket);
             })
-        }
+        }.test()}
         
-        novalue1: RecogniseCst {
+        #[test] fn novalue1() { RecogniseCst {
             func: attribute_list,
             src: "[foo= bar=baz]", 
             result: cst(AttributeList, |b| {
@@ -450,9 +414,9 @@ mod tests {
                 });
                 b.kw(RightBracket);
             })
-        }
+        }.test()}
         
-        novalue2: RecogniseCst {
+        #[test] fn novalue2() { RecogniseCst {
             func: attribute_list,
             src: r#"[bar="what" foo=]"#,
             result: cst(AttributeList, |b| {
@@ -473,9 +437,9 @@ mod tests {
                 });
                 b.kw(RightBracket);
             })
-        }
+        }.test()}
         
-        nospaces: RecogniseCst {
+        #[test] fn nospaces() { RecogniseCst {
             func: attribute_list,
             src: "[foo=\"bar\"flip]",
             result: cst(AttributeList, |b| {
@@ -494,8 +458,8 @@ mod tests {
                 });
                 b.kw(RightBracket);
             })
-        }
-    );
+        }.test()}
+    }
 
     mod attrq {
         use super::*;

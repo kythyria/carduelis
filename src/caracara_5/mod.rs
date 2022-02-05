@@ -37,11 +37,15 @@ enum SyntaxKind {
     QuotedString, // String containing only text and entities
     Name,         // Element, attribute, entity names
     Text,         // Text that isn't anything special at all
+    Indentation,  // Significant whitespace
     Whitespace,   // Insignificant whitespace
     Error,        // Parser is too confused to parse here.
 
-    //- The document is a fragment, as are heads and bodies -
-    Fragment,
+    //- Parts of documents -
+    Markup,       // Documents, contents of heads and bodies
+    Element,
+    Body,
+    Head,
 
     //- Attribute lists -
     AttributeList,      // List as a whole
@@ -251,10 +255,89 @@ fn attribute_list<'s>(builder: &mut GreenNodeBuilder, input: &'s str) -> Option<
     Some(lexer.remainder())
 }
 
+fn element<'s>(builder: &mut GreenNodeBuilder, input: &'s str) -> Option<&'s str> {
+    if &input[0..1] != "\\" { return None }
+    todo!();
+}
+
+enum Balancer {
+    None,
+    Paren,
+    Brace
+}
+
+struct FragmentFrame<'a> {
+    indent: &'a str,
+    balancer: Balancer,
+    balance_level: usize,
+    in_cdata: bool
+}
+
+fn fragment<'s>(builder: &mut GreenNodeBuilder, input: &'s str) -> Option<&'s str> {
+    #[derive(Logos, PartialEq, Clone, Copy, Debug)]
+    enum Token {
+        #[token("{")] LeftBrace,
+        #[token("}")] RightBrace,
+        #[token("(")] LeftParen,
+        #[token(")")] RightParen,
+        #[token("\\")] Backslash,
+        
+        #[regex(r"[\p{White_Space}&&[^\r\n\u{000C}\u{000B}\u{2028}\u{2029}\u{0085}]]*", priority=1)]
+        Whitespace,
+
+        #[regex(r"\\[A-Za-z][-_A-Za-z0-9]*")]
+        EscapedName,
+
+        #[regex(r"\\[\{\(\)\}\$:*\+\-_=\^%#\~!?]")]
+        EscapedSpecial,
+
+        #[regex(r"\r\n|[\r\n\u{000C}\u{000B}\u{2028}\u{2029}\u{0085}]", priority=2)]
+        Newline,
+
+        #[regex(".*")]
+        Text,
+
+        #[error] Error
+    }
+
+    let mut lexer = Token::lexer(input);
+    let mut stack = vec![ FragmentFrame {
+        indent: "",
+        balancer: Balancer::None,
+        balance_level: 1,
+        in_cdata: false
+    } ];
+    loop {
+        match lexer.next() {
+            None => break,
+            Some(Token::LeftBrace) => {
+                let frame = stack.last_mut().unwrap();
+                if let Balancer::Brace = frame.balancer {
+                    frame.balance_level += 1;
+                }
+                builder.leaf(SyntaxKind::Text, "{");
+            },
+            Some(Token::RightBrace) => {
+                let frame = stack.last_mut().unwrap();
+                if let Balancer::Paren = frame.balancer {
+                    frame.balance_level -= 1;
+                    if frame.balance_level == 0 {
+                        stack.pop();
+                        builder.kw(SyntaxKind::RightBrace);
+
+                    }
+                }
+            },
+            _ => todo!()
+        }
+    }
+    todo!()
+}
+
 #[cfg(test)]
 mod tests {
     use rowan::{GreenNode, GreenNodeBuilder};
-    use super::{quoted_string, attribute_list, SyntaxKind::*, GreenBuildExt};
+    use super::{quoted_string, attribute_list, SyntaxKind::*, GreenBuildExt, fragment};
     use super::rowan_utils::{cst, format_cst};
 
     trait ConcreteParser<'s> {
@@ -553,5 +636,121 @@ mod tests {
                 b.kw(DoubleQuote);
             })
         }.test()}
+    }
+
+    mod markup {
+        use super::*;
+
+        #[test] fn simpleelement() { RecogniseCst{
+            func: fragment,
+            src: r"foo\bar baz",
+            result: cst(Markup, |b| {
+                b.leaf(Text, "foo");
+                b.interior(Element, |b| {
+                    b.kw(Backslash);
+                    b.leaf(Name, "bar");
+                });
+                b.leaf(Text, " ");
+                b.leaf(Text, "baz");
+            })
+        }.test()}
+
+        #[test] fn elem_attr() { RecogniseCst{
+            func: fragment,
+            src: r"\foo[bar]baz",
+            result: cst(Markup, |b| {
+                b.interior(Element, |b| {
+                    b.kw(Backslash);
+                    b.leaf(Name, "foo");
+                    b.interior(AttributeList, |b| {
+                        b.kw(LeftBrace);
+                        b.interior(Attribute, |b| {
+                            b.leaf(Name, "bar")
+                        });
+                        b.kw(RightBrace);
+                    });
+                });
+                b.leaf(Text, "baz");
+            })
+        }.test()}
+
+        #[test] fn headbody() { RecogniseCst{
+            func: fragment,
+            src: r"a\foo(bar){baz}b",
+            result: cst(Markup, |b| {
+                b.leaf(Text, "a");
+                b.interior(Element, |b| {
+                    b.kw(Backslash);
+                    b.leaf(Name, "foo");
+                    b.interior(Head, |b| {
+                        b.kw(LeftParen);
+                        b.interior(Markup, |b| {
+                            b.leaf(Text, "bar");
+                        });
+                        b.kw(RightParen);
+                    });
+                    b.interior(Body, |b| {
+                        b.kw(LeftParen);
+                        b.interior(Markup, |b| {
+                            b.leaf(Text, "baz");
+                        });
+                        b.kw(RightParen);
+                    });
+                });
+                b.leaf(Text, "b");
+            })
+        }.test() }
+
+        #[test] fn headattr() { RecogniseCst{
+            func: fragment,
+            src: r"\foo(bar)[baz]",
+            result: cst(Markup, |b| {
+                b.interior(Element, |b| {
+                    b.kw(Backslash);
+                    b.leaf(Name, "foo");
+                    b.interior(Head, |b| {
+                        b.kw(LeftParen);
+                        b.interior(Markup, |b| {
+                            b.leaf(Text, "bar");
+                        });
+                        b.kw(RightParen);
+                    });
+                    b.interior(AttributeList, |b| {
+                        b.kw(LeftBrace);
+                        b.interior(Attribute, |b| {
+                            b.leaf(Name, "baz")
+                        });
+                        b.kw(RightBrace);
+                    });
+                });
+            })
+        }.test()}
+
+        #[test] fn attrhead() { RecogniseCst{
+            func: fragment,
+            src: r"\foo(bar)[baz]",
+            result: cst(Markup, |b| {
+                b.interior(Element, |b| {
+                    b.kw(Backslash);
+                    b.leaf(Name, "foo");
+                    b.interior(AttributeList, |b| {
+                        b.kw(LeftBrace);
+                        b.interior(Attribute, |b| {
+                            b.leaf(Name, "baz")
+                        });
+                        b.kw(RightBrace);
+                    });
+                    b.interior(Head, |b| {
+                        b.kw(LeftParen);
+                        b.interior(Markup, |b| {
+                            b.leaf(Text, "bar");
+                        });
+                        b.kw(RightParen);
+                    });
+                });
+            })
+        }.test()}
+
+
     }
 }

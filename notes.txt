@@ -30,3 +30,7 @@ Hmm, how to lex/classify? Take cue from TeX?
   Name          /[-_:A-Za-z0-9]/  (should : be legal here? It'll make ' bodies less useful)
 
 Can we abstract over rowan *and* various AST impls enough to have a consistent handling? Even if rowan has its own, we might want many ASTs.
+
+XPath has a reasonable model for querying any tree-ish; a query is a series of flat_map() where the available expressions include "one step along an axis" and "filter by predicate". In fact it already has multichildren, to deal with attributes. Of course, one of those axes is "descendants".
+
+A subset of XPath is equivalent to operating on the path zipper.

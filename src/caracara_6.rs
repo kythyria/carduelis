@@ -8,15 +8,10 @@
 //! I'm not sure exactly what punctation that allows.
 //! 
 //! This only knows the attribute list being the *first* thing to follow the element name.
-//! Which in turn means a hilariously inefficient approach: blindly tokenise everything,
-//! with the alternate lexer states for attributes, and then when we see the start of a
-//! literal body in tree construction, skip ahead to the end and use that to re-slice the
-//! source.
-//! 
-//! This also means that a random `}##` intended to be an end of body followed by two
-//! literal hashes won't be taken that way, but that's what escaping is for.
+//! It also has a slightly different way for literal bodies to work: `#{` *anywhere* starts
+//! such a section. Single quotes (`'`) around attribute values is not supported.
 
-use logos::Logos;
+use logos::{Logos, Source};
 
 #[derive(Logos)]
 enum DataState {
@@ -35,8 +30,7 @@ enum DataState {
     #[token("(")] LeftParen,
     #[token(")")] RightParen,
     #[token("}")] RightBrace,
-    #[regex(r"#+\{")] StartLiteralText,
-    #[regex(r"\}#+")] EndLiteralText,
+    #[regex(r"#+\{")] StartCdata,
     #[regex(r"\r\n|[\r\n\u{000C}\u{000B}\u{2028}\u{2029}\u{0085}]")] Newline,
     #[regex(r"[^\\{()}\r\n\u{000C}\u{000B}\u{2028}\u{2029}\u{0085}]+")] Text,
     #[error] Error
@@ -47,7 +41,6 @@ enum AttributeListState {
     #[token("]")] EndOfList,
     #[token("=")] Equals,
     #[token("\"")] DoubleQuote,
-    #[token("'")] SingleQuote,
     #[regex(r"[a-zA-Z0-9][-_a-zA-Z0-9]+")] Name,
     #[regex(r#"\s+"#)] Whitespace,
     #[error] Error
@@ -61,31 +54,28 @@ enum AttributeValueState {
     #[regex(r"\\e\{[a-zA-Z0-9][-_a-zA-Z0-9]+\}")]
     EntityReferenceBracket,
 
-    #[token("\\\\")] EscapedBackslash,
-    #[token("\\\"")] EscapedDoubleQuote,
-    #[token("\\\'")] EscapedSingleQuote,
-    #[token("\'")] SingleQuote,
+    #[regex(r#"\\['"\\]"#)] EscapedChar,
+    #[regex(r#"[^\\"]+"#)] Text,
     #[token("\"")] DoubleQuote,
-
-    #[regex(r#"[^\\'"]+"#)] Text,
-
     #[error] Error
 }
 
 enum LogicalToken {
     Newline,
     Text(String),
+    ReplacedText(String),
     Element(String),
-    Attribute(String),
-    AttributeText(String),
+    AttributeName(String),
+    AttributeEquals,
+    AttributeQuote,
     BeginAttributes,
     EndAttributes,
+    BeginCdata,
+    EndCdata,
     LeftParen,
     LeftBrace,
     RightBrace,
     RightParen,
-    StartCdata(usize),
-    EndCdata(usize)
 }
 
 #[derive(Clone, Copy)]
@@ -144,8 +134,8 @@ impl<'src> Lexer<'src> {
                 }
                 Ok(())
             },
-            LexerState::AttributeList => todo!(),
-            LexerState::AttributeValue => todo!(),
+            LexerState::AttributeList => self.in_attribute_list(),
+            LexerState::AttributeValue => self.in_attribute_string(),
         }
     }
 
@@ -157,16 +147,16 @@ impl<'src> Lexer<'src> {
             match pt {
                 DataState::EntityReferenceApos => {
                     let ent_name = &(token_slice[3..]);
-                    self.out_entity(sp, ent_name, LogicalToken::Text)?;
+                    self.out_entity(sp, ent_name, LogicalToken::ReplacedText)?;
                 },
                 DataState::EntityReferenceBracket => {
                     let ent_name = &(token_slice[3..(token_slice.len() - 1)]);
-                    self.out_entity(sp, ent_name, LogicalToken::Text)?;
+                    self.out_entity(sp, ent_name, LogicalToken::ReplacedText)?;
                 },
 
                 DataState::EscapedChar => {
                     let ch = &token_slice[1..];
-                    self.out(sp, LogicalToken::Text(ch.to_string()));
+                    self.out(sp, LogicalToken::ReplacedText(ch.to_string()));
                 },
 
                 DataState::Element => {
@@ -181,14 +171,37 @@ impl<'src> Lexer<'src> {
                 DataState::RightParen => self.out(sp, LogicalToken::RightParen),
                 DataState::RightBrace => self.out(sp, LogicalToken::RightBrace),
 
-                DataState::StartLiteralText => {
-                    let len = (sp.end - sp.start) - 1;
-                    self.out(sp, LogicalToken::EndCdata(len as usize));
+                DataState::StartCdata => {
+                    self.out(sp, LogicalToken::BeginCdata);
+
+                    let hashes_len = (sp.end - sp.start) as usize - 1 ;
+                    let hashes = &lexer.slice()[0..hashes_len];
+                    let end_marker = format!("}}{}", hashes);
+                    let end_pos = match lexer.remainder().find(&end_marker) {
+                        Some(p) => p,
+                        None => return Err(Error{
+                            location: sp,
+                            message: "Unterminated CDATA section".to_string()
+                        })
+                    };
+
+                    let text = lexer.remainder()[0..end_pos].to_owned();
+                    let text_span = Span {
+                        start: sp.end,
+                        end: sp.end + end_pos as u32
+                    };
+                    self.out(text_span, LogicalToken::Text(text));
+
+                    let end_span = Span {
+                        start: sp.end + end_pos as u32,
+                        end: sp.end + (end_pos + end_marker.len()) as u32 
+                    };
+                    self.out(end_span, LogicalToken::EndCdata);
+
+                    lexer.bump(end_pos);
+                    lexer.bump(end_marker.len());
                 },
-                DataState::EndLiteralText => {
-                    let len = (sp.end - sp.start) - 1;
-                    self.out(sp, LogicalToken::EndCdata(len as usize));
-                },
+
                 DataState::Newline => self.out(sp, LogicalToken::Newline),
                 DataState::Text => {
                     self.out(sp, LogicalToken::Text(token_slice.to_string()));
@@ -202,6 +215,85 @@ impl<'src> Lexer<'src> {
             }
         }
         Ok(())
+    }
+
+    fn in_attribute_list(&mut self) -> Result<(), Error> {
+        let mut lexer = AttributeListState::lexer(self.input);
+        while let Some(pt) = lexer.next() {
+            let sp = self.translate_span(lexer.span());
+            match pt {
+                AttributeListState::EndOfList => {
+                    self.out(sp, LogicalToken::EndAttributes);
+                    self.input = lexer.remainder();
+                    self.state = LexerState::Data;
+                    return Ok(());
+                },
+                AttributeListState::Equals => {
+                    self.out(sp, LogicalToken::AttributeEquals);
+                },
+                AttributeListState::DoubleQuote => {
+                    self.out(sp, LogicalToken::AttributeQuote);
+                    self.input = lexer.remainder();
+                    self.state = LexerState::AttributeValue;
+                    return Ok(());
+                },
+                AttributeListState::Name => {
+                    self.out(sp, LogicalToken::AttributeName(lexer.slice().to_string()));
+                },
+                AttributeListState::Whitespace => { },
+                AttributeListState::Error => {
+                    return Err(Error {
+                        location: sp,
+                        message: "Stray characters in attribute list".to_string()
+                    })
+                },
+            }
+        }
+        Err(Error{
+            location: self.translate_span(lexer.span()),
+            message: "Unterminated attribute list".to_string()
+        })
+    }
+
+    fn in_attribute_string(&mut self) -> Result<(), Error> {
+        let mut lexer = AttributeValueState::lexer(self.input);
+        while let Some(pt) = lexer.next() {
+            let sp = self.translate_span(lexer.span());
+            let token_slice = lexer.slice();
+            match pt {
+                AttributeValueState::EntityReferenceApos => {
+                    let ent_name = &(token_slice[3..]);
+                    self.out_entity(sp, ent_name, LogicalToken::ReplacedText)?;
+                },
+                AttributeValueState::EntityReferenceBracket => {
+                    let ent_name = &(token_slice[3..(token_slice.len() - 1)]);
+                    self.out_entity(sp, ent_name, LogicalToken::ReplacedText)?;
+                },
+                AttributeValueState::EscapedChar => {
+                    let ch = &token_slice[1..];
+                    self.out(sp, LogicalToken::ReplacedText(ch.to_string()));
+                },
+                AttributeValueState::Text => {
+                    self.out(sp, LogicalToken::Text(token_slice.to_string()));
+                },
+                AttributeValueState::DoubleQuote => {
+                    self.out(sp, LogicalToken::AttributeQuote);
+                    self.input = lexer.remainder();
+                    self.state = LexerState::AttributeList;
+                    return Ok(())
+                }
+                AttributeValueState::Error => {
+                    return Err(Error {
+                        location: sp,
+                        message: "Stray characters in attribute value".to_string()
+                    })
+                },
+            }
+        }
+        Err(Error{
+            location: self.translate_span(lexer.span()),
+            message: "Unterminated attribute value".to_string()
+        })
     }
 
     fn out_entity(&mut self, sp: Span, name: &str, tok: impl Fn(String)->LogicalToken) -> Result<(), Error> {

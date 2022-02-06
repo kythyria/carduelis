@@ -6,32 +6,35 @@
 //! 
 //! Names are in general `[a-zA-Z0-9][-_a-zA-Z0-9]+`, really they should be XID, but
 //! I'm not sure exactly what punctation that allows.
+//! 
+//! This only knows the attribute list being the *first* thing to follow the element name.
+//! Which in turn means a hilariously inefficient approach: blindly tokenise everything,
+//! with the alternate lexer states for attributes, and then when we see the start of a
+//! literal body in tree construction, skip ahead to the end and use that to re-slice the
+//! source.
 
 use logos::Logos;
 
 #[derive(Logos)]
 enum DataState {
-    #[regex(r"\\e'[a-zA-Z0-9][-_a-zA-Z0-9]+")] EntityReferenceApos,
+    #[regex(r"\\e'[a-zA-Z0-9][-_a-zA-Z0-9]*")] EntityReferenceApos,
     
-    #[regex(r"\\e\([a-zA-Z0-9][-_a-zA-Z0-9]+\)")]
-    #[regex(r"\\e\{[a-zA-Z0-9][-_a-zA-Z0-9]+\}")]
+    #[regex(r"\\e\([a-zA-Z0-9][-_a-zA-Z0-9]*\)")]
+    #[regex(r"\\e\{[a-zA-Z0-9][-_a-zA-Z0-9]*\}")]
     EntityReferenceBracket,
 
-    #[token("\\")] Backslash,
+    #[regex(r#"\\[\\{()}#\[\]]"#)] EscapedChar,
+    #[regex(r#"\\[-+_%^/~@¬|?!<>=]"#)] PunctElement,
+    #[regex(r"\\[a-zA-Z0-9][-_a-zA-Z0-9]*")] NameElement,
+
     #[token("{")] LeftBrace,
     #[token("(")] LeftParen,
     #[token(")")] RightParen,
     #[token("}")] RightBrace,
+    #[regex(r"#+\{")] StartLiteralText,
+    #[regex(r"\}#+")] EndLiteralText,
     #[regex(r"\r\n|[\r\n\u{000C}\u{000B}\u{2028}\u{2029}\u{0085}]")] Newline,
     #[regex(r"[^\\{()}\r\n\u{000C}\u{000B}\u{2028}\u{2029}\u{0085}]+")] Text,
-    #[error] Error
-}
-
-#[derive(Logos)]
-enum ElementNameState {
-    #[regex(r#"[\\{()}#]"#)] EscapedChar,
-    #[regex(r#"[-+_%^/~@¬|?!<>=]"#)] SpecialChar,
-    #[regex(r"[a-zA-Z0-9][-_a-zA-Z0-9]+")] Name,
     #[error] Error
 }
 
@@ -79,6 +82,7 @@ enum LogicalToken {
     Element(String),
     Attribute(String),
     AttributeText(String),
+    BeginAttributes,
     BeginHead,
     BeginBody,
     End
@@ -96,8 +100,7 @@ struct Error {
 
 enum LexerState {
     Data,
-    ElementName,
-    ElementContent,
+    BeforeElementContent,
     AttributeValue,
     AttributeList
 }
@@ -148,8 +151,7 @@ impl<'src> Lexer<'src> {
     fn dispatch(&mut self) -> Result<(), Error> {
         match self.state {
             LexerState::Data => self.in_data(),
-            LexerState::ElementName => todo!(),
-            LexerState::ElementContent => todo!(),
+            LexerState::BeforeElementContent => todo!(),
             LexerState::AttributeValue => todo!(),
             LexerState::AttributeList => todo!(),
         }
@@ -185,7 +187,20 @@ impl<'src> Lexer<'src> {
                     };
                     self.out(sp, LogicalToken::Text(ent_val));
                 },
-                DataState::Backslash => todo!(),
+
+                DataState::EscapedChar => {
+                    let sp = self.translate_span(lexer.span());
+                    let token_slice = lexer.slice();
+                    let ch = &token_slice[1..];
+                    self.out(sp, LogicalToken::Text(ch.to_string()));
+                },
+
+                DataState::PunctElement => {
+                    let sp = self.translate_span(lexer.span());
+                    let token_slice = lexer.slice();
+                    self.out(sp, LogicalToken::Element(el.to_string()));
+                    self.state = LexerState::BeforeElementContent;
+                }
 
                 // If we get to a left brace/paren in data, it's data.
                 // The ones that mean something are in other states.
@@ -224,6 +239,8 @@ impl<'src> Lexer<'src> {
                         }
                         else if stack_len > 1 && stack_frame.balance_count == 0 {
                             self.stack.pop();
+                            let stack_frame = self.stack.last_mut().unwrap();
+                            stack_frame.seen_head = true;
                             self.out(sp, LogicalToken::End);
                         }
                         else if stack_len == 1 && stack_frame.balance_count == 0 {

@@ -12,6 +12,9 @@
 //! with the alternate lexer states for attributes, and then when we see the start of a
 //! literal body in tree construction, skip ahead to the end and use that to re-slice the
 //! source.
+//! 
+//! This also means that a random `}##` intended to be an end of body followed by two
+//! literal hashes won't be taken that way, but that's what escaping is for.
 
 use logos::Logos;
 
@@ -24,8 +27,9 @@ enum DataState {
     EntityReferenceBracket,
 
     #[regex(r#"\\[\\{()}#\[\]]"#)] EscapedChar,
-    #[regex(r#"\\[-+_%^/~@¬|?!<>=]"#)] PunctElement,
-    #[regex(r"\\[a-zA-Z0-9][-_a-zA-Z0-9]*")] NameElement,
+
+    #[regex(r#"\\[-+_%^/~@¬|?!<>=]"#)]
+    #[regex(r"\\[a-zA-Z0-9][-_a-zA-Z0-9]*")] Element,
 
     #[token("{")] LeftBrace,
     #[token("(")] LeftParen,
@@ -39,21 +43,13 @@ enum DataState {
 }
 
 #[derive(Logos)]
-enum ElementContentState {
-    #[token("(")] StartHead,
-    #[token("{")] StartBody,
-    #[token("[")] StartAttributes,
-    #[regex(r"#+\{")] StartLiteralText,
-    #[error] Error
-}
-
-#[derive(Logos)]
 enum AttributeListState {
     #[token("]")] EndOfList,
     #[token("=")] Equals,
     #[token("\"")] DoubleQuote,
     #[token("'")] SingleQuote,
     #[regex(r"[a-zA-Z0-9][-_a-zA-Z0-9]+")] Name,
+    #[regex(r#"\s+"#)] Whitespace,
     #[error] Error
 }
 
@@ -83,11 +79,16 @@ enum LogicalToken {
     Attribute(String),
     AttributeText(String),
     BeginAttributes,
-    BeginHead,
-    BeginBody,
-    End
+    EndAttributes,
+    LeftParen,
+    LeftBrace,
+    RightBrace,
+    RightParen,
+    StartCdata(usize),
+    EndCdata(usize)
 }
 
+#[derive(Clone, Copy)]
 struct Span {
     start: u32,
     end: u32
@@ -100,44 +101,25 @@ struct Error {
 
 enum LexerState {
     Data,
-    BeforeElementContent,
+    BeforeAttributeList,
+    AttributeList,
     AttributeValue,
-    AttributeList
-}
-
-enum Balance {
-    Paren,
-    Brace
-}
-
-struct LexerStackFrame {
-    balance: Balance,
-    balance_count: usize,
-    seen_attrs: bool,
-    seen_head: bool
 }
 
 struct Lexer<'src> {
     original_input: &'src str,
     input: &'src str,
     state: LexerState,
-    stack: Vec<LexerStackFrame>,
     out_buf: Vec<(Span, LogicalToken)>,
-    entity_getter: Box<dyn Fn(&str) -> Option<&str>>
+    entity_getter: Box<dyn Fn(&str) -> Option<String>>
 }
 
 impl<'src> Lexer<'src> {
-    fn tokenise(input: &'src str, entities: Box<dyn Fn(&str) -> Option<&str>>) -> Result<Vec<(Span, LogicalToken)>, Error> {
+    fn tokenise(input: &'src str, entities: Box<dyn Fn(&str) -> Option<String>>) -> Result<Vec<(Span, LogicalToken)>, Error> {
         let mut lex = Lexer {
             original_input: input,
             input,
             state: LexerState::Data,
-            stack: vec![ LexerStackFrame {
-                balance: Balance::Brace,
-                balance_count: 0,
-                seen_attrs: true,
-                seen_head: true
-            } ],
             out_buf: Vec::new(),
             entity_getter: entities
         };
@@ -151,146 +133,84 @@ impl<'src> Lexer<'src> {
     fn dispatch(&mut self) -> Result<(), Error> {
         match self.state {
             LexerState::Data => self.in_data(),
-            LexerState::BeforeElementContent => todo!(),
-            LexerState::AttributeValue => todo!(),
+            LexerState::BeforeAttributeList => {
+                if self.input.bytes().next() == Some(b'[') {
+                    self.out(self.translate_span(0..1), LogicalToken::BeginAttributes);
+                    self.state = LexerState::AttributeList;
+                    self.input = &self.input[1..];
+                }
+                else {
+                    self.state = LexerState::Data;
+                }
+                Ok(())
+            },
             LexerState::AttributeList => todo!(),
+            LexerState::AttributeValue => todo!(),
         }
     }
 
     fn in_data(&mut self) -> Result<(), Error> {
         let mut lexer = DataState::lexer(self.input);
         while let Some(pt) = lexer.next() {
+            let sp = self.translate_span(lexer.span());
+            let token_slice = lexer.slice();
             match pt {
                 DataState::EntityReferenceApos => {
-                    let token_slice = lexer.slice();
                     let ent_name = &(token_slice[3..]);
-                    let sp = self.translate_span(lexer.span());
-                    let ent_val = match (self.entity_getter)(ent_name) {
-                        Some(s) => String::from(s),
-                        None => return Err(Error{
-                            location: sp,
-                            message: format!("Unknown entity name {:?}", ent_name)
-                        }),
-                    };
-                    self.out(sp, LogicalToken::Text(ent_val));
+                    self.out_entity(sp, ent_name, LogicalToken::Text)?;
                 },
                 DataState::EntityReferenceBracket => {
-                    let token_slice = lexer.slice();
                     let ent_name = &(token_slice[3..(token_slice.len() - 1)]);
-                    let sp = self.translate_span(lexer.span());
-                    let ent_val = match (self.entity_getter)(ent_name) {
-                        Some(s) => String::from(s),
-                        None => return Err(Error{
-                            location: sp,
-                            message: format!("Unknown entity name {:?}", ent_name)
-                        }),
-                    };
-                    self.out(sp, LogicalToken::Text(ent_val));
+                    self.out_entity(sp, ent_name, LogicalToken::Text)?;
                 },
 
                 DataState::EscapedChar => {
-                    let sp = self.translate_span(lexer.span());
-                    let token_slice = lexer.slice();
                     let ch = &token_slice[1..];
                     self.out(sp, LogicalToken::Text(ch.to_string()));
                 },
 
-                DataState::PunctElement => {
-                    let sp = self.translate_span(lexer.span());
-                    let token_slice = lexer.slice();
+                DataState::Element => {
+                    let el = &token_slice[1..];
                     self.out(sp, LogicalToken::Element(el.to_string()));
-                    self.state = LexerState::BeforeElementContent;
-                }
-
-                // If we get to a left brace/paren in data, it's data.
-                // The ones that mean something are in other states.
-                // So we just bump the counters if needed.
-
-                DataState::LeftBrace => {
-                    let sp = self.translate_span(lexer.span());
-                    let stack_frame = self.stack.last_mut().unwrap();
-                    match stack_frame.balance {
-                        Balance::Paren => (),
-                        Balance::Brace => stack_frame.balance_count += 1,
-                    }
-                    self.out(sp, LogicalToken::Text("(".to_string()));
-                },
-                DataState::LeftParen => {
-                    let sp = self.translate_span(lexer.span());
-                    let stack_frame = self.stack.last_mut().unwrap();
-                    match stack_frame.balance {
-                        Balance::Paren => stack_frame.balance_count += 1,
-                        Balance::Brace => (),
-                    }
-                    self.out(sp, LogicalToken::Text("(".to_string()));
+                    self.input = lexer.remainder();
+                    self.state = LexerState::BeforeAttributeList;
                 },
 
-                // But if we get to a } or ) it might end something.
+                DataState::LeftBrace => self.out(sp, LogicalToken::LeftBrace),
+                DataState::LeftParen => self.out(sp, LogicalToken::LeftParen),
+                DataState::RightParen => self.out(sp, LogicalToken::RightParen),
+                DataState::RightBrace => self.out(sp, LogicalToken::RightBrace),
 
-                DataState::RightParen => {
-                    let sp = self.translate_span(lexer.span());
-                    let stack_len = self.stack.len();
-                    let stack_frame = self.stack.last_mut().unwrap();
-                    if let Balance::Paren = stack_frame.balance {
-                        if false { }
-                        else if stack_frame.balance_count > 0 {
-                            stack_frame.balance_count -= 1;
-                            self.out(sp, LogicalToken::Text(")".to_string()));
-                        }
-                        else if stack_len > 1 && stack_frame.balance_count == 0 {
-                            self.stack.pop();
-                            let stack_frame = self.stack.last_mut().unwrap();
-                            stack_frame.seen_head = true;
-                            self.out(sp, LogicalToken::End);
-                        }
-                        else if stack_len == 1 && stack_frame.balance_count == 0 {
-                            return Err(Error{
-                                location: sp,
-                                message: "Unbalanced close paren.".to_string()
-                            })
-                        }
-                    }
-                    else {
-                        self.out(sp, LogicalToken::Text(")".to_string()));
-                    }
+                DataState::StartLiteralText => {
+                    let len = (sp.end - sp.start) - 1;
+                    self.out(sp, LogicalToken::EndCdata(len as usize));
                 },
-                DataState::RightBrace => {
-                    let sp = self.translate_span(lexer.span());
-                    let stack_len = self.stack.len();
-                    let stack_frame = self.stack.last_mut().unwrap();
-                    if let Balance::Brace = stack_frame.balance {
-                        if false { }
-                        else if stack_frame.balance_count > 0 {
-                            stack_frame.balance_count -= 1;
-                            self.out(sp, LogicalToken::Text("}".to_string()));
-                        }
-                        else if stack_len > 1 && stack_frame.balance_count == 0 {
-                            self.stack.pop();
-                            self.out(sp, LogicalToken::End);
-                        }
-                        else if stack_len == 1 && stack_frame.balance_count == 0 {
-                            return Err(Error{
-                                location: sp,
-                                message: "Unbalanced close brace.".to_string()
-                            })
-                        }
-                    }
-                    else {
-                        self.out(sp, LogicalToken::Text("}".to_string()));
-                    }
+                DataState::EndLiteralText => {
+                    let len = (sp.end - sp.start) - 1;
+                    self.out(sp, LogicalToken::EndCdata(len as usize));
                 },
-                DataState::Newline => {
-                    let sp = self.translate_span(lexer.span());
-                    self.out(sp, LogicalToken::Newline);
-                },
+                DataState::Newline => self.out(sp, LogicalToken::Newline),
                 DataState::Text => {
-                    let token_slice = lexer.slice();
-                    let sp = self.translate_span(lexer.span());
                     self.out(sp, LogicalToken::Text(token_slice.to_string()));
                 },
-                DataState::Error => todo!(),
+                DataState::Error => {
+                    return Err(Error {
+                        location: sp,
+                        message: "Tokenisation error in text (possibly backslash at EOF?)".to_string()
+                    })
+                },
             }
         }
+        Ok(())
+    }
+
+    fn out_entity(&mut self, sp: Span, name: &str, tok: impl Fn(String)->LogicalToken) -> Result<(), Error> {
+        let ent_val = (self.entity_getter)(name)
+            .ok_or_else(|| Error {
+                location: sp,
+                message: format!("Unknown entity name {:?}", name)
+            })?;
+        self.out(sp, tok(ent_val));
         Ok(())
     }
 

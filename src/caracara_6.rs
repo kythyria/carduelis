@@ -95,7 +95,6 @@ struct Error {
 
 enum LexerState {
     Data,
-    BeforeAttributeList,
     AttributeList,
     AttributeValue,
 }
@@ -127,17 +126,6 @@ impl<'src> Lexer<'src> {
     fn dispatch(&mut self) -> Result<(), Error> {
         match self.state {
             LexerState::Data => self.in_data(),
-            LexerState::BeforeAttributeList => {
-                if &self.input[0..1] == "[" {
-                    self.out(self.translate_span(0..1), LogicalToken::BeginAttributes);
-                    self.state = LexerState::AttributeList;
-                    self.input = &self.input[1..];
-                }
-                else {
-                    self.state = LexerState::Data;
-                }
-                Ok(())
-            },
             LexerState::AttributeList => self.in_attribute_list(),
             LexerState::AttributeValue => self.in_attribute_string(),
         }
@@ -166,18 +154,19 @@ impl<'src> Lexer<'src> {
                 DataState::Element => {
                     let el = &token_slice[1..];
                     self.out(sp, LogicalToken::Element(el.to_string()));
-                    self.input = lexer.remainder();
 
-                    if &self.input[0..1] == "[" {
-                        self.out(self.translate_span(0..1), LogicalToken::BeginAttributes);
+
+                    if lexer.remainder().len() > 0 && &lexer.remainder()[0..1] == "[" {
+                        let bracket_sp = Span {
+                            start: sp.end,
+                            end: sp.end + 1
+                        };
+                        self.out(bracket_sp, LogicalToken::BeginAttributes);
+                        lexer.bump(1);
+                        self.input = lexer.remainder();
                         self.state = LexerState::AttributeList;
-                        self.input = &self.input[1..];
+                        return Ok(());
                     }
-                    else {
-                        self.state = LexerState::Data;
-                    }
-
-                    return Ok(());
                 },
 
                 DataState::LeftBrace => self.out(sp, LogicalToken::LeftBrace),
@@ -429,8 +418,8 @@ mod lexer_tests {
         15..16 AttributeQuote,
         16..19 Text("wat"),
         19..20 AttributeQuote,
-        20..12 EndAttributes,
-        12..14 Newline
+        20..21 EndAttributes,
+        21..23 Newline
     ]);
 
     lex!(emoji: r"\e'u3010\e{u1F426}\e'u1f409\e'u1F98E whee" => [
@@ -457,19 +446,19 @@ mod lexer_tests {
     lex!(delims: r"a\foo[]b(c{d" => [
         0..1 Text("a"),
         1..5 Element("foo"),
-        6..7 BeginAttributes,
-        7..8 EndAttributes,
-        8..9 Text("b"),
-        9..10 LeftParen,
-        10..11 Text("c"),
-        11..12 LeftBrace,
-        12..13 Text("d")
+        5..6 BeginAttributes,
+        6..7 EndAttributes,
+        7..8 Text("b"),
+        8..9 LeftParen,
+        9..10 Text("c"),
+        10..11 LeftBrace,
+        11..12 Text("d")
     ]);
 
     lex!(odd_square: r"\f[]][" => [
         0..2 Element("f"),
-        3..4 BeginAttributes,
-        4..5 EndAttributes,
-        5..7 Text("][")
+        2..3 BeginAttributes,
+        3..4 EndAttributes,
+        4..6 Text("][")
     ]);
 }

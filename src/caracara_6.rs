@@ -11,7 +11,7 @@
 //! It also has a slightly different way for literal bodies to work: `#{` *anywhere* starts
 //! such a section. Single quotes (`'`) around attribute values is not supported.
 
-use logos::{Logos, Source};
+use logos::Logos;
 
 #[derive(Logos)]
 enum DataState {
@@ -60,6 +60,7 @@ enum AttributeValueState {
     #[error] Error
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum LogicalToken {
     Newline,
     Text(String),
@@ -78,12 +79,13 @@ enum LogicalToken {
     RightParen,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Span {
     start: u32,
     end: u32
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Error {
     location: Span,
     message: String
@@ -214,6 +216,7 @@ impl<'src> Lexer<'src> {
                 },
             }
         }
+        self.input = lexer.remainder();
         Ok(())
     }
 
@@ -297,11 +300,46 @@ impl<'src> Lexer<'src> {
     }
 
     fn out_entity(&mut self, sp: Span, name: &str, tok: impl Fn(String)->LogicalToken) -> Result<(), Error> {
-        let ent_val = (self.entity_getter)(name)
-            .ok_or_else(|| Error {
+        #[derive(Logos)]
+        enum EntName {
+            #[regex(r"u[a-fA-F0-9]+")] Codepoint,
+            #[regex(r".+")] Entity,
+            #[error] Error
+        }
+
+        let mut lexer = EntName::lexer(name);
+        let ent_val = match lexer.next() {
+            None => return Err(Error {
+                location: sp, message: "Empty entity name".to_string()
+            }),
+            Some(EntName::Codepoint) => {
+                let chars = &lexer.slice()[1..];
+                let usv = match u32::from_str_radix(chars, 16) {
+                    Ok(v) => v,
+                    Err(_) => return Err(Error {
+                        location: sp, message: "Invalid character code".to_string()
+                    })
+                };
+                let char = match char::from_u32(usv) {
+                    Some(c) => c,
+                    None => return Err(Error {
+                        location: sp, message: "Invalid Unicode scalar value".to_string()
+                    })
+                };
+                char.to_string()
+            },
+            Some(EntName::Entity) => match (self.entity_getter)(lexer.slice()) {
+                Some(st) => st,
+                None => return Err(Error {
+                    location: sp,
+                    message: format!("Unknown entity name {:?}", name)
+                })
+            },
+            Some(EntName::Error) => return Err(Error {
                 location: sp,
-                message: format!("Unknown entity name {:?}", name)
-            })?;
+                message: format!("Severely mangled entity name {:?}", name)
+            })
+        };
         self.out(sp, tok(ent_val));
         Ok(())
     }
@@ -315,4 +353,109 @@ impl<'src> Lexer<'src> {
             end: (diff + span.end) as u32
         }
     }
+}
+
+mod lexer_tests {
+    //use super::{Span, Lexer, LogicalToken};
+    
+    fn test_entities(name: &str) -> Option<String> {
+        match name {
+            "bird" => Some("🐦"),
+            "dragon" => Some("🐉"),
+            "dragon_head" => Some("🐲"),
+            "r3" => Some("ℝ³"),
+            _ => None
+        }.map(|i| i.to_string())
+    }
+
+    macro_rules! lex {
+        ($name:ident : $input:literal => $tokenspec:tt) => {
+            #[test]
+            fn $name() {
+                let output = super::Lexer::tokenise($input, Box::new(test_entities));
+                let target = lex!(@ts $tokenspec);
+                assert_eq!(output, Ok(target));
+            }
+        };
+        (@ts [$($start:literal..$end:literal $tid:ident $(($data:literal))? ),*]) => {
+            vec![$(
+                (super::Span {start: $start, end: $end}, super::LogicalToken::$tid $(( $data.into() ))? )
+            ),*]
+        };
+    }
+
+    lex!(super_simple: r#"a\foo b"# => [
+        0..1 Text("a"),
+        1..5 Element("foo"),
+        5..6 Text(" b")
+    ]);
+
+    lex!(loose_cdata: r##"foo #{bar }## baz"## => [
+        0..4 Text("foo"),
+        4..6 BeginCdata,
+        6..10 Text("bar "),
+        10..12 EndCdata,
+        12..17 Text("# baz")
+    ]);
+
+    lex!(attribute_list_empty: r#"\f[]"# => [
+        0..2 Element("f"),
+        2..3 BeginAttributes,
+        3..4 EndAttributes
+    ]);
+
+    lex!(attribute_list_full: "\\f[foo bar=baz=\"wat\"]\r\n" => [
+        0..2 Element("f"),
+        2..3 BeginAttributes,
+        3..6 AttributeName("foo"),
+        7..10 AttributeName("bar"),
+        10..11 AttributeEquals,
+        11..14 AttributeName("baz"),
+        14..15 AttributeEquals,
+        15..16 AttributeQuote,
+        16..19 Text("wat"),
+        19..20 AttributeQuote,
+        20..12 EndAttributes,
+        12..14 Newline
+    ]);
+
+    lex!(emoji: r"\e'u3010\e{u1F426}\e'u1f409\e'u1F98E whee" => [
+        0..8 ReplacedText("【"),
+        8..18 ReplacedText("🐦"),
+        18..27 ReplacedText("🐉"),
+        27..36 ReplacedText("🦎"),
+        36..41 Text(" whee")
+    ]);
+
+    lex!(more_emoji: r#"\foo[bar="a\e'bird\e'u1F985"]"# => [
+        0..4 Element("foo"),
+        4..5 BeginAttributes,
+        5..8 AttributeName("bar"),
+        8..9 AttributeEquals,
+        9..10 AttributeQuote,
+        10..11 Text("a"),
+        11..18 ReplacedText("🐦"),
+        18..27 ReplacedText("🦅"),
+        27..28 AttributeQuote,
+        28..29 EndAttributes
+    ]);
+
+    lex!(delims: r"a\foo[]b(c{d" => [
+        0..1 Text("a"),
+        1..5 Element("foo"),
+        6..7 BeginAttributes,
+        7..8 EndAttributes,
+        8..9 Text("b"),
+        9..10 LeftParen,
+        10..11 Text("c"),
+        11..12 LeftBrace,
+        12..13 Text("d")
+    ]);
+
+    lex!(odd_square: r"\f[]][" => [
+        0..2 Element("f"),
+        3..4 BeginAttributes,
+        4..5 EndAttributes,
+        5..7 Text("][")
+    ]);
 }

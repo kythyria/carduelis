@@ -11,16 +11,19 @@
 //! It also has a slightly different way for literal bodies to work: `#{` *anywhere* starts
 //! such a section. Single quotes (`'`) around attribute values is not supported.
 
+mod lexer;
+mod parser;
 
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Span {
+pub struct Span {
     start: u32,
     end: u32
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Error {
+pub struct Error {
     location: Span,
     message: String
 }
@@ -30,6 +33,30 @@ impl Error {
     }
 }
 
+pub enum Node {
+    Element(Element),
+    Text(Text),
+    Newline(Newline)
 }
 
+pub struct Element {
+    pub name_span: Span,
+    pub name: String,
+    pub attributes: HashMap<String, String>,
+    pub head: Vec<Node>,
+    pub body: Vec<Node>
+}
+
+pub struct Newline {
+    pub span: Span
+}
+
+pub enum SpanType {
+    Literal,
+    Replaced
+}
+
+pub struct Text {
+    pub spans: Vec<(u32, SpanType, Span)>,
+    pub value: String
 }

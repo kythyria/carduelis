@@ -92,6 +92,11 @@ struct Error {
     location: Span,
     message: String
 }
+impl Error {
+    fn at(sp: Span, msg: impl ToString) -> Error {
+        Error { location: sp, message: msg.to_string() }
+    }
+}
 
 enum LexerState {
     Data,
@@ -183,10 +188,7 @@ impl<'src> Lexer<'src> {
                     let end_marker = format!("}}{}", hashes);
                     let end_pos = match lexer.remainder().find(&end_marker) {
                         Some(p) => p,
-                        None => return Err(Error{
-                            location: sp,
-                            message: "Unterminated CDATA section".to_string()
-                        })
+                        None => return Err(Error::at(sp, "Unterminated CDATA section"))
                     };
 
                     let text = lexer.remainder()[0..end_pos].to_owned();
@@ -211,10 +213,7 @@ impl<'src> Lexer<'src> {
                     self.out(sp, LogicalToken::Text(token_slice.to_string()));
                 },
                 DataState::Error => {
-                    return Err(Error {
-                        location: sp,
-                        message: "Tokenisation error in text (possibly backslash at EOF?)".to_string()
-                    })
+                    return Err(Error::at(sp, "Tokenisation error in text (possibly backslash at EOF?)"))
                 },
             }
         }
@@ -247,17 +246,11 @@ impl<'src> Lexer<'src> {
                 },
                 AttributeListState::Whitespace => { },
                 AttributeListState::Error => {
-                    return Err(Error {
-                        location: sp,
-                        message: "Stray characters in attribute list".to_string()
-                    })
+                    return Err(Error::at(sp,"Stray characters in attribute list"))
                 },
             }
         }
-        Err(Error{
-            location: self.translate_span(lexer.span()),
-            message: "Unterminated attribute list".to_string()
-        })
+        Err(Error::at(self.translate_span(lexer.span()), "Unterminated attribute list"))
     }
 
     fn in_attribute_string(&mut self) -> Result<(), Error> {
@@ -288,17 +281,11 @@ impl<'src> Lexer<'src> {
                     return Ok(())
                 }
                 AttributeValueState::Error => {
-                    return Err(Error {
-                        location: sp,
-                        message: "Stray characters in attribute value".to_string()
-                    })
+                    return Err(Error::at(sp,"Stray characters in attribute value"))
                 },
             }
         }
-        Err(Error{
-            location: self.translate_span(lexer.span()),
-            message: "Unterminated attribute value".to_string()
-        })
+        Err(Error::at(self.translate_span(lexer.span()), "Unterminated attribute value"))
     }
 
     fn out_entity(&mut self, sp: Span, name: &str, tok: impl Fn(String)->LogicalToken) -> Result<(), Error> {
@@ -311,36 +298,24 @@ impl<'src> Lexer<'src> {
 
         let mut lexer = EntName::lexer(name);
         let ent_val = match lexer.next() {
-            None => return Err(Error {
-                location: sp, message: "Empty entity name".to_string()
-            }),
+            None => return Err(Error::at(sp, "Empty entity name")),
             Some(EntName::Codepoint) => {
                 let chars = &lexer.slice()[1..];
                 let usv = match u32::from_str_radix(chars, 16) {
                     Ok(v) => v,
-                    Err(_) => return Err(Error {
-                        location: sp, message: "Invalid character code".to_string()
-                    })
+                    Err(_) => return Err(Error::at(sp, "Invalid character code"))
                 };
                 let char = match char::from_u32(usv) {
                     Some(c) => c,
-                    None => return Err(Error {
-                        location: sp, message: "Invalid Unicode scalar value".to_string()
-                    })
+                    None => return Err(Error::at(sp, "Invalid Unicode scalar value"))
                 };
                 char.to_string()
             },
             Some(EntName::Entity) => match (self.entity_getter)(lexer.slice()) {
                 Some(st) => st,
-                None => return Err(Error {
-                    location: sp,
-                    message: format!("Unknown entity name {:?}", name)
-                })
+                None => return Err(Error::at(sp, format!("Unknown entity name {:?}", name)))
             },
-            Some(EntName::Error) => return Err(Error {
-                location: sp,
-                message: format!("Severely mangled entity name {:?}", name)
-            })
+            Some(EntName::Error) => return Err(Error::at(sp, format!("Severely mangled entity name {:?}", name)))
         };
         self.out(sp, tok(ent_val));
         Ok(())

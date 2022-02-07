@@ -30,9 +30,10 @@ enum DataState {
     #[token("(")] LeftParen,
     #[token(")")] RightParen,
     #[token("}")] RightBrace,
+    #[token("#")] Hash,
     #[regex(r"#+\{")] StartCdata,
     #[regex(r"\r\n|[\r\n\u{000C}\u{000B}\u{2028}\u{2029}\u{0085}]")] Newline,
-    #[regex(r"[^\\{()}\r\n\u{000C}\u{000B}\u{2028}\u{2029}\u{0085}]+")] Text,
+    #[regex(r"[^\\{()}#\r\n\u{000C}\u{000B}\u{2028}\u{2029}\u{0085}]+")] Text,
     #[error] Error
 }
 
@@ -77,6 +78,7 @@ enum LogicalToken {
     LeftBrace,
     RightBrace,
     RightParen,
+    Hash
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,7 +128,7 @@ impl<'src> Lexer<'src> {
         match self.state {
             LexerState::Data => self.in_data(),
             LexerState::BeforeAttributeList => {
-                if self.input.bytes().next() == Some(b'[') {
+                if &self.input[0..1] == "[" {
                     self.out(self.translate_span(0..1), LogicalToken::BeginAttributes);
                     self.state = LexerState::AttributeList;
                     self.input = &self.input[1..];
@@ -165,13 +167,24 @@ impl<'src> Lexer<'src> {
                     let el = &token_slice[1..];
                     self.out(sp, LogicalToken::Element(el.to_string()));
                     self.input = lexer.remainder();
-                    self.state = LexerState::BeforeAttributeList;
+
+                    if &self.input[0..1] == "[" {
+                        self.out(self.translate_span(0..1), LogicalToken::BeginAttributes);
+                        self.state = LexerState::AttributeList;
+                        self.input = &self.input[1..];
+                    }
+                    else {
+                        self.state = LexerState::Data;
+                    }
+
+                    return Ok(());
                 },
 
                 DataState::LeftBrace => self.out(sp, LogicalToken::LeftBrace),
                 DataState::LeftParen => self.out(sp, LogicalToken::LeftParen),
                 DataState::RightParen => self.out(sp, LogicalToken::RightParen),
                 DataState::RightBrace => self.out(sp, LogicalToken::RightBrace),
+                DataState::Hash => self.out(sp, LogicalToken::Hash),
 
                 DataState::StartCdata => {
                     self.out(sp, LogicalToken::BeginCdata);
@@ -387,15 +400,16 @@ mod lexer_tests {
     lex!(super_simple: r#"a\foo b"# => [
         0..1 Text("a"),
         1..5 Element("foo"),
-        5..6 Text(" b")
+        5..7 Text(" b")
     ]);
 
     lex!(loose_cdata: r##"foo #{bar }## baz"## => [
-        0..4 Text("foo"),
+        0..4 Text("foo "),
         4..6 BeginCdata,
         6..10 Text("bar "),
         10..12 EndCdata,
-        12..17 Text("# baz")
+        12..13 Hash,
+        13..17 Text(" baz")
     ]);
 
     lex!(attribute_list_empty: r#"\f[]"# => [

@@ -50,7 +50,7 @@ enum AttributeValueState {
     #[error] Error
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum LogicalToken {
     Newline,
     Text(String),
@@ -81,12 +81,12 @@ pub struct Lexer<'src> {
     original_input: &'src str,
     input: &'src str,
     state: LexerState,
-    out_buf: Vec<(Span, LogicalToken)>,
+    out_buf: Vec<(LogicalToken, Span)>,
     entity_getter: Box<dyn Fn(&str) -> Option<String>>
 }
 
 impl<'src> Lexer<'src> {
-    pub fn tokenise(input: &'src str, entities: Box<dyn Fn(&str) -> Option<String>>) -> Result<Vec<(Span, LogicalToken)>, Error> {
+    pub fn tokenise(input: &'src str, entities: Box<dyn Fn(&str) -> Option<String>>) -> Result<Vec<(LogicalToken, Span)>, Error> {
         let mut lex = Lexer {
             original_input: input,
             input,
@@ -99,7 +99,7 @@ impl<'src> Lexer<'src> {
         Ok(lex.out_buf)
     }
 
-    fn out(&mut self, span: Span, tok: LogicalToken) { self.out_buf.push((span, tok)) }
+    fn out(&mut self, span: Span, tok: LogicalToken) { self.out_buf.push((tok, span)) }
 
     fn dispatch(&mut self) -> Result<(), Error> {
         match self.state {
@@ -327,7 +327,7 @@ mod lexer_tests {
         };
         (@ts [$($start:literal..$end:literal $tid:ident $(($data:literal))? ),*]) => {
             vec![$(
-                (super::Span {start: $start, end: $end}, super::LogicalToken::$tid $(( $data.into() ))? )
+                (super::LogicalToken::$tid $(( $data.into() ))?, super::Span {start: $start, end: $end} )
             ),*]
         };
     }

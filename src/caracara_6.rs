@@ -15,11 +15,24 @@ mod lexer;
 mod parser;
 
 use std::collections::HashMap;
+use std::convert::TryInto;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Span {
     start: u32,
     end: u32
+}
+impl chumsky::Span for Span {
+    type Context = ();
+    type Offset = u32;
+
+    fn new(_: Self::Context, range: std::ops::Range<Self::Offset>) -> Self {
+        Span { start: range.start, end: range.end }
+    }
+
+    fn context(&self) -> Self::Context { () }
+    fn start(&self) -> Self::Offset { self.start }
+    fn end(&self) -> Self::Offset { self.end }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,10 +52,19 @@ pub enum Node {
     Newline(Newline)
 }
 
-pub struct Element {
+pub struct Name {
+    pub span: Span,
+    pub name: String
+}
+
+pub struct Attribute {
     pub name_span: Span,
-    pub name: String,
-    pub attributes: HashMap<String, String>,
+    pub value: Text
+}
+
+pub struct Element {
+    pub name: Name,
+    pub attributes: HashMap<String, Attribute>,
     pub head: Vec<Node>,
     pub body: Vec<Node>
 }
@@ -59,4 +81,24 @@ pub enum SpanType {
 pub struct Text {
     pub spans: Vec<(u32, SpanType, Span)>,
     pub value: String
+}
+
+impl Text {
+    fn empty_at(offs: u32) -> Text {
+        Text {
+            value: String::new(),
+            spans: vec![(0, SpanType::Replaced, Span { start: offs, end: offs })]
+        }
+    }
+}
+
+impl From<Name> for Text {
+    fn from(src: Name) -> Self {
+        Text {
+            value: src.name,
+            spans: vec![
+                (src.name.len().try_into().unwrap(), SpanType::Literal, src.span)
+            ]
+        }
+    }
 }

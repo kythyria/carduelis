@@ -17,7 +17,7 @@ mod parser;
 use std::collections::HashMap;
 use std::convert::TryInto;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Span {
     start: u32,
     end: u32
@@ -88,6 +88,13 @@ impl Text {
         Text {
             value: String::new(),
             spans: vec![(0, SpanType::Replaced, Span { start: offs, end: offs })]
+        }
+    }
+
+    fn single(span: Span, data: String) -> Text {
+        Text {
+            value: data,
+            spans: vec![(0, SpanType::Literal, span)]
         }
     }
 }

@@ -46,22 +46,26 @@ impl Error {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum Node {
     Element(Element),
     Text(Text),
     Newline(Newline)
 }
 
+#[derive(Debug, Clone)]
 pub struct Name {
     pub span: Span,
     pub name: String
 }
 
+#[derive(Debug, Clone)]
 pub struct Attribute {
     pub name_span: Span,
     pub value: Text
 }
 
+#[derive(Debug, Clone)]
 pub struct Element {
     pub name: Name,
     pub attributes: HashMap<String, Attribute>,
@@ -69,15 +73,18 @@ pub struct Element {
     pub body: Vec<Node>
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct Newline {
     pub span: Span
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum SpanType {
     Literal,
     Replaced
 }
 
+#[derive(Debug, Clone)]
 pub struct Text {
     pub spans: Vec<(u32, SpanType, Span)>,
     pub value: String
@@ -101,10 +108,11 @@ impl Text {
 
 impl From<Name> for Text {
     fn from(src: Name) -> Self {
+        let srclen = src.name.len();
         Text {
             value: src.name,
             spans: vec![
-                (src.name.len().try_into().unwrap(), SpanType::Literal, src.span)
+                (srclen.try_into().unwrap(), SpanType::Literal, src.span)
             ]
         }
     }

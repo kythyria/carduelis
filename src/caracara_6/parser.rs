@@ -2,7 +2,7 @@ use std::convert::TryInto;
 use std::iter::FromIterator;
 use std::collections::HashMap;
 
-use chumsky::prelude::*;
+use chumsky::{prelude::*, Stream};
 
 use super::lexer::LogicalToken;
 use super::{Attribute, Element, Newline, Name, Node, Span, SpanType, Text};
@@ -247,6 +247,16 @@ fn document() -> impl Parser<LogicalToken, Vec<Node>, Error=Simple<LogicalToken,
     element
         .or(non_nested_fragpiece())
         .repeated()
+        .then_ignore(end())
         .collect::<BuildFragment>()
         .map(|bf| bf.finish())
+}
+
+pub fn parse_tokens(input: Vec<(LogicalToken, Span)>) -> Result<Vec<Node>, Vec<Simple<LogicalToken, Span>>>{
+    let eoi = input.last()
+        .map(|i| i.1.end)
+        .map(|i| Span{ start: i, end: i })
+        .unwrap_or_default();
+    let parser = document();
+    parser.parse(Stream::from_iter(eoi, input.into_iter()))
 }

@@ -2,7 +2,7 @@ use logos::Logos;
 
 use super::{Span, Error};
 
-#[derive(Logos)]
+#[derive(Debug, Logos)]
 enum DataState {
     #[regex(r"\\e'[a-zA-Z0-9][-_a-zA-Z0-9]*")] EntityReferenceApos,
     
@@ -26,22 +26,22 @@ enum DataState {
     #[error] Error
 }
 
-#[derive(Logos)]
+#[derive(Debug, Logos)]
 enum AttributeListState {
     #[token("]")] EndOfList,
     #[token("=")] Equals,
     #[token("\"")] DoubleQuote,
-    #[regex(r"[a-zA-Z0-9][-_a-zA-Z0-9]+")] Name,
+    #[regex(r"[a-zA-Z0-9][-_a-zA-Z0-9]*")] Name,
     #[regex(r#"\s+"#)] Whitespace,
     #[error] Error
 }
 
-#[derive(Logos)]
+#[derive(Debug, Logos)]
 enum AttributeValueState {
-    #[regex(r"\\e'[a-zA-Z0-9][-_a-zA-Z0-9]+")] EntityReferenceApos,
+    #[regex(r"\\e'[a-zA-Z0-9][-_a-zA-Z0-9]*")] EntityReferenceApos,
     
-    #[regex(r"\\e\([a-zA-Z0-9][-_a-zA-Z0-9]+\)")]
-    #[regex(r"\\e\{[a-zA-Z0-9][-_a-zA-Z0-9]+\}")]
+    #[regex(r"\\e\([a-zA-Z0-9][-_a-zA-Z0-9]*\)")]
+    #[regex(r"\\e\{[a-zA-Z0-9][-_a-zA-Z0-9]*\}")]
     EntityReferenceBracket,
 
     #[regex(r#"\\['"\\]"#)] EscapedChar,
@@ -70,7 +70,7 @@ pub enum LogicalToken {
     Hash
 }
 
-
+#[derive(Clone, Copy, Debug)]
 enum LexerState {
     Data,
     AttributeList,
@@ -406,5 +406,20 @@ mod lexer_tests {
         2..3 BeginAttributes,
         3..4 EndAttributes,
         4..6 Text("][")
+    ]);
+
+    lex!(attributes_2: r#"\a[b="\e'bird!"]{0}"# => [
+        0..2 Element("a"),
+        2..3 BeginAttributes,
+        3..4 AttributeName("b"),
+        4..5 AttributeEquals,
+        5..6 AttributeQuote,
+        6..13 ReplacedText("🐦"),
+        13..14 Text("!"),
+        14..15 AttributeQuote,
+        15..16 EndAttributes,
+        16..17 LeftBrace,
+        17..18 Text("0"),
+        18..19 RightBrace
     ]);
 }

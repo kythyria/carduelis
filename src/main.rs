@@ -49,28 +49,3 @@ fn main() {
         }
     }
 }
-
-fn parser() {
-    use chumsky::prelude::*;
-    enum Tok {
-        LeftParen,
-        RightParen,
-        Text(&'static str)
-    }
-
-    let left_paren = select! { Tok::LeftParen => String::from("(") };
-    let right_paren = select! { Tok::RightParen => String::from(")") };
-    let everything = select! {
-        Tok::LeftParen => String::from("("),
-        Tok::RightParen => String::from(")"),
-        Tok::Text(s) => String::from(s),
-    };
-
-    let parser = recursive(|balanced| {
-        left_paren
-        .then(balanced)
-        .then(right_paren)
-        .or(everything)
-        .repeated()
-    }).delimited_by(left_paren, right_paren)
-}

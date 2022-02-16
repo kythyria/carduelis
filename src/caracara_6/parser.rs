@@ -7,14 +7,14 @@ use chumsky::{prelude::*, Stream};
 use super::lexer::LogicalToken;
 use super::{Attribute, Element, Newline, Name, Node, Span, SpanType, Text};
 
-struct BuildQuoted {
+struct BuildAttributeValue {
     spans: Vec<(u32, SpanType, Span)>,
     value: String
 }
-impl FromIterator<(SpanType, String, Span)> for BuildQuoted {
+impl FromIterator<(SpanType, String, Span)> for BuildAttributeValue {
     fn from_iter<T: IntoIterator<Item = (SpanType, String, Span)>>(iter: T) -> Self {
         let iter = iter.into_iter();
-        let mut out = BuildQuoted {
+        let mut out = BuildAttributeValue {
             spans: Vec::with_capacity(iter.size_hint().0),
             value: String::new()
         };
@@ -25,13 +25,56 @@ impl FromIterator<(SpanType, String, Span)> for BuildQuoted {
         out
     }
 }
-impl BuildQuoted {
+impl BuildAttributeValue {
     fn done(self) -> Text {
         Text { spans: self.spans, value: self.value }
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
+enum FragmentItem {
+    Element(Element),
+    Newline,
+    Text(String),
+    Replaced(String),
+    StaticText(&'static str),
+    Nested(FragmentTree)
+}
+#[derive(Clone, Debug)]
+struct FragmentTree {
+    start: (&'static str, Span),
+    end: (&'static str, Span),
+    children: Vec<(FragmentItem, Span)>
+}
+
+fn fragment_tree<LD,RD,Leaf>(left_delim: LD, right_delim: RD, leaf: Leaf)
+-> impl Parser<LogicalToken, Vec<Node>, Error=Simple<LogicalToken, Span>> + Clone
+where
+    LD:   Parser<LogicalToken, (&'static str, Span), Error=Simple<LogicalToken, Span>> + 'static + Copy,
+    RD:   Parser<LogicalToken, (&'static str, Span), Error=Simple<LogicalToken, Span>> + 'static + Copy,
+    Leaf: Parser<LogicalToken, (FragmentItem, Span), Error=Simple<LogicalToken, Span>> + 'static + Clone
+{
+    recursive(|tree| {
+        leaf
+        .or(
+            left_delim
+            .then(tree)
+            .then(right_delim)
+            .map(|((l,t),r)| {
+                (FragmentItem::Nested(FragmentTree{
+                    start: l,
+                    end: r,
+                    children: t
+                }), Span{start: l.1.start, end: r.1.end})
+            })
+        ).repeated()
+    })
+    .delimited_by(left_delim, right_delim)
+    .collect::<BuildFragment>()
+    .map(|bf|bf.finish())
+}
+
+#[derive(Clone, Debug)]
 enum FragmentPiece {
     Element(Element),
     Newline,
@@ -61,8 +104,19 @@ impl BuildFragment {
         self.items.push(node);
     }
     fn push_text(&mut self, st: SpanType, sp: Span, data: &str) {
+        let is_continue = self.curr_spans.last().map(|(_, ty, last_span)| {
+            *ty == SpanType::Literal && st == SpanType::Literal && last_span.end == sp.start
+        }).unwrap_or(false);
+
         self.curr_text.push_str(data);
-        self.curr_spans.push((data.len().try_into().unwrap(), st, sp));
+        if is_continue {
+            let last = self.curr_spans.last_mut().unwrap();
+            last.0 += data.len() as u32;
+            last.2.end = sp.end;
+        }
+        else {
+            self.curr_spans.push((data.len().try_into().unwrap(), st, sp));
+        }
     }
     fn push_frag(&mut self, frag: (FragmentPiece, Span)) {
         let (fp, span) = frag;
@@ -79,6 +133,21 @@ impl BuildFragment {
         self.end_curr_text();
         self.items
     }
+
+    fn push_frag_item(&mut self, (frag, span): (FragmentItem, Span)) {
+        match frag {
+            FragmentItem::Element(el) => self.push_node(Node::Element(el)),
+            FragmentItem::Newline => self.push_node(Node::Newline(Newline{ span })),
+            FragmentItem::Text(data) => self.push_text(SpanType::Literal, span, &data),
+            FragmentItem::Replaced(data) => self.push_text(SpanType::Replaced, span, &data),
+            FragmentItem::StaticText(data) => self.push_text(SpanType::Literal, span, &data),
+            FragmentItem::Nested(data) => {
+                self.push_text(SpanType::Literal, data.start.1, data.start.0);
+                self.extend(data.children);
+                self.push_text(SpanType::Literal, data.end.1, data.end.0);
+            }
+        }
+    }
 }
 impl FromIterator<(FragmentPiece, Span)> for BuildFragment {
     fn from_iter<T: IntoIterator<Item = (FragmentPiece, Span)>>(iter: T) -> Self {
@@ -91,6 +160,21 @@ impl Extend<(FragmentPiece, Span)> for BuildFragment {
     fn extend<T: IntoIterator<Item = (FragmentPiece, Span)>>(&mut self, iter: T) {
         for fp in iter.into_iter() {
             self.push_frag(fp);
+        }
+    }
+}
+
+impl FromIterator<(FragmentItem, Span)> for BuildFragment {
+    fn from_iter<T: IntoIterator<Item = (FragmentItem, Span)>>(iter: T) -> Self {
+        let mut bf = BuildFragment::default();
+        bf.extend(iter.into_iter());
+        bf
+    }
+}
+impl Extend<(FragmentItem, Span)> for BuildFragment {
+    fn extend<T: IntoIterator<Item = (FragmentItem, Span)>>(&mut self, iter: T) {
+        for fp in iter.into_iter() {
+            self.push_frag_item(fp);
         }
     }
 }
@@ -146,8 +230,9 @@ fn attribute_list() -> impl Parser<LogicalToken, HashMap<String, Attribute>, Err
         LogicalToken::ReplacedText(s) => (SpanType::Replaced, s)
     }.map_with_span(|(typ, value), span| (typ, value, span))
     .repeated()
-    .collect::<BuildQuoted>()
-    .map(BuildQuoted::done);
+    .delimited_by(just(LogicalToken::AttributeQuote), just(LogicalToken::AttributeQuote))
+    .collect::<BuildAttributeValue>()
+    .map(BuildAttributeValue::done);
 
     let attribute_name = select! {
             LogicalToken::AttributeName(n) => n
@@ -221,30 +306,59 @@ fn bodies(body: impl Parser<LogicalToken, Vec<Node>, Error = Simple<LogicalToken
         .map(|o| o.unwrap_or_default())
 }
 
-fn document() -> impl Parser<LogicalToken, Vec<Node>, Error=Simple<LogicalToken, Span>> {
-    let left_paren = select!{ LogicalToken::LeftParen => FragmentPiece::Static("(") }
-        .map_with_span(|d,s| (d, s));
-    let right_paren = select!{ LogicalToken::RightParen => FragmentPiece::Static(")") }
-        .map_with_span(|d,s| (d, s));
-    let left_brace = select!{ LogicalToken::LeftBrace => FragmentPiece::Static("{") }
-        .map_with_span(|d,s| (d, s));
-    let right_brace = select!{ LogicalToken::RightBrace => FragmentPiece::Static("}") }
-        .map_with_span(|d,s| (d, s));
+fn element() -> impl Parser<LogicalToken, Element, Error=Simple<LogicalToken, Span>> {
+    recursive(|element| {
+        let lp = select!{ LogicalToken::LeftParen => "(" }.map_with_span(|d,s|(d,s));
+        let rp = select!{ LogicalToken::RightParen => ")" }.map_with_span(|d,s|(d,s));
+        let hl = element.clone()
+            .map(|e| (FragmentItem::Element(e), Span::default()))
+            .or(select! {
+                LogicalToken::Newline => FragmentItem::Newline,
+                LogicalToken::Text(st) => FragmentItem::Text(st),
+                LogicalToken::ReplacedText(st) => FragmentItem::Replaced(st),
+                LogicalToken::Hash => FragmentItem::StaticText("#"),
+                LogicalToken::LeftBrace => FragmentItem::StaticText("{"),
+                LogicalToken::RightBrace => FragmentItem::StaticText("}"),
+            }.map_with_span(|d,s| (d, s)))
+            .or(select! { LogicalToken::Text(s) => s }
+                .delimited_by(select!{LogicalToken::BeginCdata=>()}, select!{LogicalToken::EndCdata=>()})
+                .map(|d| FragmentItem::Text(d))
+                .map_with_span(|d,s| (d, s))
+            );
+        let head = fragment_tree(lp, rp, hl);
 
-    let element = recursive(|element| {
-        let head = balanced_fragment("head", left_paren, right_paren, element.clone());
-        let body = balanced_fragment("body", left_brace, right_brace, element.clone());
+        let lb = select!{ LogicalToken::LeftBrace => "{" }.map_with_span(|d,s|(d,s));
+        let rb = select!{ LogicalToken::RightBrace => "}" }.map_with_span(|d,s|(d,s));
+        let bl = element
+            .map(|e| (FragmentItem::Element(e), Span::default()))
+            .or(select! {
+                LogicalToken::Newline => FragmentItem::Newline,
+                LogicalToken::Text(st) => FragmentItem::Text(st),
+                LogicalToken::ReplacedText(st) => FragmentItem::Replaced(st),
+                LogicalToken::Hash => FragmentItem::StaticText("#"),
+                LogicalToken::LeftParen => FragmentItem::StaticText("("),
+                LogicalToken::RightParen => FragmentItem::StaticText(")"),
+            }.map_with_span(|d,s| (d, s)))
+            .or(select! { LogicalToken::Text(s) => s }
+                .delimited_by(select!{LogicalToken::BeginCdata=>()}, select!{LogicalToken::EndCdata=>()})
+                .map(|d| FragmentItem::Text(d))
+                .map_with_span(|d,s| (d, s))
+            );
+        let body = fragment_tree(lb, rb, bl);
 
         select!{ LogicalToken::Element(name) => name }
             .map_with_span(|name, span| Name { name, span })
             .then(headattrs(head))
             .then(bodies(body))
             .map(|((name, (attributes, head)), body)| {
-                (FragmentPiece::Element(Element { name, attributes, head, body }), Span::default())
+                Element { name, attributes, head, body }
             })
-    });
+    })
+}
 
-    element
+fn document() -> impl Parser<LogicalToken, Vec<Node>, Error=Simple<LogicalToken, Span>> {
+    element()
+        .map(|e| (FragmentPiece::Element(e), Span::default()))
         .or(non_nested_fragpiece())
         .repeated()
         .then_ignore(end())

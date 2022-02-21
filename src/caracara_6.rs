@@ -310,4 +310,8 @@ mod tests {
         },
         Text { "[c]{d}"@[(6 Literal 5..11)] }
     ]);
+
+    parse_fails!(unclosed_element_1: r#"\a{{"#);
+    parse_fails!(unclosed_element_2: r#"\a(\b{)"#);
+    parse_fails!(unclosed_element_3: r#"\a{\b(})"#);
 }

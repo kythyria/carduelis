@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod caracara_6;
+mod simple_render;
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
     let bracecount: usize = args[1].parse().unwrap();

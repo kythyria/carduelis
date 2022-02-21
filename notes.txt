@@ -34,3 +34,14 @@ Can we abstract over rowan *and* various AST impls enough to have a consistent h
 XPath has a reasonable model for querying any tree-ish; a query is a series of flat_map() where the available expressions include "one step along an axis" and "filter by predicate". In fact it already has multichildren, to deal with attributes. Of course, one of those axes is "descendants".
 
 A subset of XPath is equivalent to operating on the path zipper.
+
+Do we need some sort of stackless trickery to avoid exploding on deep nesting? Can wasm do that for us?
+
+For a prototype, just break if the nesting gets too deep.
+
+Either way, processing modules transform an AST node at a time. They have access to some general context,
+and to a collection of node name -> module maps. Not sure if these should work on HTML-oid, or Caracara. 
+Either would work, and we may want to process HTML and markdown anyway... and the present DOM works for both.
+
+For now we can prototype with a simple hardcoded CC -> HTML IR -> browser HTML thing.
+IR to remove heads, etc.

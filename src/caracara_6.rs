@@ -22,6 +22,22 @@ pub struct Span {
     start: u32,
     end: u32
 }
+impl Span {
+    /// Make a span which encompasses the inputs and all the space between them
+    pub fn covering(l: Span, r: Span) -> Span {
+        Span {
+            start: l.start.min(r.start),
+            end: l.end.max(r.end)
+        }
+    }
+    pub fn expand_by(&self, r: Span) -> Span { Span::covering(*self, r) }
+    pub fn implied_by_start(&self) -> Span {
+        Span {
+            start: self.start,
+            end: self.start
+        }
+    }
+}
 impl chumsky::Span for Span {
     type Context = ();
     type Offset = u32;
@@ -52,6 +68,15 @@ pub enum Node {
     Text(Text),
     Newline(Newline)
 }
+impl Node {
+    pub fn span(&self) -> Span {
+        match self {
+            Node::Element(e) => e.span(),
+            Node::Text(t) => t.span(),
+            Node::Newline(nl) => nl.span,
+        }
+    }
+}
 impl std::fmt::Debug for Node {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -80,6 +105,22 @@ pub struct Element {
     pub attributes: HashMap<String, Attribute>,
     pub head: Vec<Node>,
     pub body: Vec<Node>
+}
+impl Element {
+    pub fn span(&self) -> Span {
+        // TODO: Give the whole element a span, which works better for generated ones.
+        let attr_span = self.attributes.values()
+            .map(|i| i.name_span.expand_by(i.value.span()))
+            .reduce(|i,j| i.expand_by(j));
+        let head_span = self.head.last().map(|i| i.span());
+        let body_span = self.body.last().map(|i| i.span());
+
+        let mut res = self.name.span;
+        if let Some(a) = attr_span { res = res.expand_by(a); }
+        if let Some(a) = head_span { res = res.expand_by(a); }
+        if let Some(a) = body_span { res = res.expand_by(a); }
+        res
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +155,10 @@ impl Text {
             value: data,
             spans: vec![(0, SpanType::Literal, span)]
         }
+    }
+
+    pub fn span(&self) -> Span {
+        Span::covering(self.spans[0].2, self.spans.last().unwrap().2)
     }
 }
 

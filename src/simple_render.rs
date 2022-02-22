@@ -30,7 +30,7 @@
 //! |--------------------|---------|
 //! | `\+`               | `<ins>` |
 //! | `\-`               | `<del>` |
-//! | `\article(h){b}    | `<article>` starting with an appropriately-ranked header element containing `h`. |
+//! | `\article(h){b}`   | `<article>` starting with an appropriately-ranked header element containing `h`. |
 //! | `\details(h){b}`   | `<details><summary>h</>b</>` |
 //! | `\doc`             | Controls metadata and such. |
 //! | `\figure(cap){con}`| `<figure>con<figcaption>cap</figcaption></figure>` (use `@top` to swap the order) |
@@ -104,10 +104,67 @@ fn paragraphise(mut input: Vec<cc::Node>) -> Vec<cc::Node> {
         cc::Node::Newline(_) => Item::PotentialBreak,
         cc::Node::Element(e) => classify(e),
         cc::Node::Text(_) => Item::Phrasing,
+    }).filter(|(key,items)| items.len() != 0 && !(Item::PotentialBreak == *key && items.len() == 1));
+
+    let mut output = Vec::new();
+    // this way, we don't have to worry about the starting case
+    // since none of the flow combinations ever need to look at the previous item
+    let last_type = Item::Flow;
+
+    for (curr_type, items) in breaked {
+        match (last_type, curr_type) {
+            (Item::Flow, Item::Phrasing) => output.push(items_into_paragraph(items)),
+            (Item::Phrasing, Item::Phrasing) => append_to_element(output.last_mut().unwrap(), items),
+            (Item::PotentialBreak, Item::Phrasing) => append_to_element(output.last_mut().unwrap(), items),
+            (_, Item::Flow) => drain_items_into(items, &mut output),
+            (_, Item::PotentialBreak) => start_paragraphs(&mut output, items),
+        }
+    }
+
+    output
+}
+
+fn start_paragraphs(target: &mut Vec<cc::Node>, items: &mut [cc::Node]) {
+    for i in items.iter_mut().skip(1) {
+        target.push(cc::Node::Element(cc::Element {
+            name: cc::Name{ name: String::from("p"), span: i.span().implied_by_start() },
+            attributes: std::collections::HashMap::new(),
+            head: Vec::new(),
+            body: Vec::new()
+        }))
+    }
+}
+
+fn append_to_element(existing: &mut cc::Node, items: &mut [cc::Node]) {
+    let elem = match existing {
+        cc::Node::Element(e) => e,
+        _ => panic!("Expected an element"),
+    };
+    drain_items_into(items, &mut elem.body);
+}
+
+fn items_into_paragraph(items: &mut [cc::Node]) -> cc::Node {
+    let start_span = items[0].span();
+    cc::Node::Element(cc::Element {
+        name: cc::Name { name: String::from("p"), span: start_span.implied_by_start() },
+        attributes: std::collections::HashMap::new(),
+        head: Vec::new(),
+        body: drain_items(items),
     })
-        .filter(|(key,items)| !(Item::PotentialBreak == *key && items.len() == 0))
-        ;
-    todo!();
+}
+
+fn drain_items(items: &mut [cc::Node]) -> Vec<cc::Node> {
+    let mut res = Vec::new();
+    drain_items_into(items, &mut res);
+    res
+}
+
+fn drain_items_into(items: &mut [cc::Node], target: &mut Vec<cc::Node>) {
+    target.reserve(items.len());
+    for i in items.iter_mut() {
+        let item = std::mem::replace(i, cc::Node::Newline(cc::Newline { span: cc::Span::default() }));
+        target.push(item);
+    }
 }
 
 struct GroupWithKeysMut<'a, I, P, K>

@@ -35,9 +35,10 @@
 //! | `\doc`             | Controls metadata and such. |
 //! | `\figure(cap){con}`| `<figure>con<figcaption>cap</figcaption></figure>` (use `@top` to swap the order) |
 //! | `\footnote(id){c}` | Footnote whose name is `id` and body is `c` |
+//! | `\img(src){alt}    | `<img>` element with head and body mapped to attributes. |
 //! | `\li(t){d}` (in `\dl`) | `<dt>t</dt><dd>d</dd>` as appropriate to if the head or body is given |
 ////! | `\pipetable`       | Render a very simple markdown-like table. |
-//! | `\fnref(id)`       | Reference to the footnote with name `id`.   |
+//! | `\fn(id)`          | Reference to the footnote with name `id`.   |
 //! | `\section(h){b}`   | `<section>` starting with an appropriately-ranked header element containing `h`. |
 //! | `\showtoc`         | `<nav>`, containing a copy of the page contents. |
 //! | `\shownotes`       | Display footnotes here. What happens if this isn't after all footnotes is unspecified.
@@ -48,20 +49,172 @@
 //! | Element       | Head attribute | Notes |
 //! |---------------|----------------|-------|
 //! | `\a`          | `href`         |       |
-//! | `\audio`      | `src`          | `controls` attribute is boolean, default `true`, despite the spec.          |
-//! | `\abbr`       | `title`        |                                                                             |
-//! | `\data`       | `value`        |                                                                             |
-//! | `\dfn`        | `title`        |                                                                             |
-//! | `\img`        | `src`          |                                                                             |
-//! | `\label`      | `for`          |                                                                             |
+//! | `\abbr`       | `title`        |       |
+//! | `\audio`      | `src`          | `controls` attribute is boolean, default `true`, despite the spec. |
+//! | `\data`       | `value`        |       |
+//! | `\datalist`   | `id`           |       |
+//! | `\dfn`        | `title`        |       |
+//! | `\label`      | `for`          |       |
 //! | `\time`       | `datetime`     | If no body is given, a reasonable rendering will be automatically provided. |
-//! | `\video`      | `src`          | As with `\audio`, `controls` is a default-true boolean.                     |
+//! | `\video`      | `src`          | As with `\audio`, `controls` is a default-true boolean. |
 //! 
 //! `\table`s mostly work like their HTML counterpart, but provide the `nlrow` attribute to make Newlines
 //! start new rows, and `pipecol` to start a new cell using `\|`. `\footnote` is legal where a row would be;
 //! such notes get appended immediately after the table itself.
 
 use crate::caracara_6 as cc;
+
+enum OuterType {
+    /// Must be inside a paragraph or paragraph-like
+    Inline,
+
+    /// Must be outside a paragraphoid.
+    Block,
+
+    /// Can be inside or outside a paragraphoid: if it would be the only thing
+    /// in the paragraph, no paragraph is generated.
+    Either
+}
+enum InnerType {
+    /// Never paragraphise contents
+    Inline,
+
+    /// Always paragraphise contents
+    Block,
+
+    /// Paragraphise contents if there is a double newline in there
+    Lazy,
+
+    /// Should contain nothing. Nothing, I tell you!
+    Empty
+}
+enum HeadUse {
+    None,
+    Element(&'static str),
+    Attribute(&'static str)
+}
+enum ProcessType {
+    Simple(&'static str, InnerType, HeadUse),
+    Custom(fn(cc::Element, &mut RenderContext) -> Vec<cc::Node>)
+}
+enum SectioningType {
+    Body,
+    Heading,
+    Section,
+    SecRoot
+}
+struct ElementInfo {
+    name: &'static str,
+    outside_type: OuterType,
+    processing: ProcessType,
+    sectioning: SectioningType
+}
+
+macro_rules! element_table {
+    ($($name:literal: $outside:ident, $st:ident, $it:ident( $($ib:tt)* );)* ) => {
+        const ELEMENTS: &[ElementInfo] = &[ $(
+            ElementInfo {
+                name: $name,
+                outside_type: OuterType::$outside,
+                processing: element_table!(@process $it $($ib)*),
+                sectioning: SectioningType::$st
+            }
+        ),*];
+    };
+    (@process Simple $elem:literal, $intype:ident, $hu:ident$(($hup:literal))?) => {
+        ProcessType::Simple($elem, InnerType::$intype, HeadUse::$hu$(($hup))?)
+    };
+    (@process Custom $fun:expr) => {
+        ProcessType::Custom($fun)
+    }
+}
+
+// Several elements are in this table mainly for completion, you wouldn't actually
+// type them most of the time.
+
+element_table! {
+    "+":          Inline, Body,    Simple("ins",        Inline, None);
+    "-":          Inline, Body,    Simple("del",        Inline, None);
+    "a":          Inline, Body,    Simple("a",          Inline, Attribute("href"));
+    "abbr":       Inline, Body,    Simple("abbr",       Inline, Attribute("title"));
+    "area":       Either, Body,    Simple("area",       None,   Attribute("href"));
+    "address"     Either, Body,    Simple("address",    Lazy,   None);
+    "article":    Block,  Section, Custom(render_section);
+    "aside":      Block,  Section, Custom(render_section);
+    "audio":      Block,  Body,    Custom(render_media);
+    "b":          Inline, Body,    Simple("b",          Inline, None);
+    "bdi":        Inline, Body,    Simple("bdi",        Inline, None);
+    "bdo":        Inline, Body,    Simple("bdo",        Inline, None);
+    "blockquote": Block,  SecRoot, Simple("blockquote", Lazy,   Attribute("cite"));
+    "br":         Inline, Body,    Simple("br",         Empty,  None);
+    "button":     Either, Body,    Simple("button",     Inline, None);
+    "canvas":     Either, Body,    Simple("canvas",     Lazy,   None);
+    "caption":    Block,  Body,    Simple("caption",    Block,  None);
+    "cite":       Inline, Body,    Simple("cite",       Inline, None);
+    "code":       Either, Body,    Simple("code",       Inline, None);
+    "col":        Block,  Body,    Simple("col",        Empty,  None);
+    "colgroup":   Block,  Inline,  Simple("colgroup",   Inline, None);
+    "data":       Block,  Body,    Simple("data",       Inline, Attribute("value"));
+    "datalist":   Either, Body,    Simple("datalist",   Inline, Attribute("id"));
+    "dd":         Block,  Body,    Simple("dd",         Lazy,   None);
+    "del":        Inline, Body,    Simple("del",        Inline, None);
+    "details":    Block,  SecRoot, Simple("details",    Lazy,   Element("summary"));
+    "dfn":        Inline, Body,    Simple("dfn",        Inline, Attribute("title"));
+    "dialog":     Block,  Body,    Simple("dialog",     Block,  None);
+    "div":        Block,  Body,    Simple("div",        Block,  None);
+    "dl":         Block,  Body,    Custom(render_definition_list);
+    "dt":         Block,  Body,    Simple("dt",         Lazy,   None);
+    "em":         Inline, Body,    Simple("em",         Inline, None);
+    "embed":      Either, Body,    Simple("embed"       Lazy,   Attribute("src"));
+    "fieldset":   Block,  SecRoot, Simple("fieldset",   Block,  Element("legend"));
+    "figcaption": Block,  Body,    Simple("figcaption", Lazy,   None);
+    "figure":     Block,  SecRoot, Custom(render_figure);
+    "fn":         Inline, Body,    Custom(render_fnref);
+    "footer":     Block,  Body,    Simple("footer",     Block,  None);
+    "footnote":   Block,  Body,    Custom(accumulate_footnote);
+    "form":       Block,  Body,    Simple("form",       Block,  None);
+    "h1":         Block,  Heading, Simple("h1",         Block,  None);
+    "h2":         Block,  Heading, Simple("h2",         Block,  None);
+    "h3":         Block,  Heading, Simple("h3",         Block,  None);
+    "h4":         Block,  Heading, Simple("h4",         Block,  None);
+    "h5":         Block,  Heading, Simple("h5",         Block,  None);
+    "h6":         Block,  Heading, Simple("h6",         Block,  None);
+    "header":     Block,  Body,    Simple("header",     Block,  None);
+    "hgroup":     Block,  Heading, Simple("hgroup",     Block,  None);
+    "hr":         Block,  Body,    Simple("hr",         None,   None);
+    "i":          Inline, Body,    Simple("i",          Inline, None);
+    "iframe":     Block,  Body,    Simple("iframe",     None,   Attribute("src"));
+    "img":        Either, Body,    Custom(render_image);
+    "input":      Inline, Body,    Simple("input",      None,   None);
+    "ins":        Inline, Body,    Simple("ins",        Inline, None);
+    "kbd":        Either, Body,    Simple("kbd",        Inline, None);
+    "label":      Inline, Body,    Simple("label",      Inline, Attribute("for"));
+    "legend"      Block,  Body,    Simple("legend",     Inline, None)
+    "li":         Block,  Body,    Simple("li",         Lazy,   None);
+    "link":       Either, Body,    Custom(render_link);
+    "main":       Block,  Body,    Simple("body",       Block,  None);
+    "map":        Either, Body,    Simple("map",        Lazy,   None);
+    "mark":       Inline, Body,    Simple("mark",       Inline, None);
+    "math":       Either, Body,    Custom(render_math);
+    "menu":       Block,  Body,    Simple("menu",       Inline, None);
+    "meta":       Either, Body,    Custom(render_meta);
+    "meter"       Either, Body,    Simple("meter",      Inline, None);
+    "nav":        Block,  Section, Simple("nav",        Block,  None);
+    "noscript":   Either, Body,    Simple("noscript",   Lazy,   None);
+    "object":     Either, Body,    Simple("object",     Lazy,   None);
+    "ol":         Block,  Body,    Simple("ol",         Inline, None);
+    "optgroup"    Either, Body,    Simple("optgroup",   Inline, Attribute("label"));
+    "section":    Block,  Section, Custom(render_section);
+    "showtoc":    Block,  Body,    Custom(render_toc);
+    "shownotes":  Block,  Body,    Custom(render_footnotes);
+    "table":      Block,  Body,    Custom(render_table);
+    "time":       Inline, Body,    Simple("time",    Inline, Attribute("datetime"));
+    "video":      Block,  Body,    Custom(render_media);
+}
+
+struct RenderContext;
+
+
 
 macro_rules! element_list {
     ($( $(#[$meta:meta])* $name:ident = $($item:ident)+ );+ ) => {
